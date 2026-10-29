@@ -2,7 +2,7 @@
   "entities": {
     "User": {
       "title": "User",
-      "description": "User account basic metadata and progressive onboarding answers",
+      "description": "UnStill user account basic metadata and progressive onboarding answers",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128 },
@@ -27,7 +27,7 @@
     },
     "Profile": {
       "title": "Profile",
-      "description": "User movement profile, conditions, and safety flags",
+      "description": "UnStill user movement profile, conditions, and safety flags",
       "type": "object",
       "properties": {
         "conditions": { "type": "array" },

@@ -1,32 +1,43 @@
-# Habit Flow — Self-Guided Daily Movement Coach
+# UnStill
 
-Habit Flow is a zero-cost, browser-based daily movement coach for adults who sit at a desk or want gentle, guilt-free daily activity. Each day provides one main workout, 3 to 5 three-minute resets placed inside your break windows, a 5-point posture check, condition care cards, and a shareable Daily Boost quote.
+**Everyday movement that fits real life.**
 
-## Owner Setup Steps (Firebase Spark Free Plan)
+UnStill is a zero-cost, offline-first daily movement coach for adults who sit at a desk or want gentle, guilt-free daily activity. Each day provides one tailored main session, 2 to 5 short movement resets placed inside your active work window, a 5-point posture check, condition care cards, and a shareable Daily Boost quote.
 
-1. **Create a free Firebase project** on the **Spark plan** (no credit card or billing required).
-   - Enable **Authentication** with **Google** and **Anonymous** providers.
-   - Create a **Cloud Firestore** database in production mode and paste the rules from `firestore.rules`.
-2. **Configure environment variables**:
-   Copy your Firebase web app config values into `.env` (or GitHub Actions repository variables):
-   - `VITE_FIREBASE_API_KEY`
-   - `VITE_FIREBASE_AUTH_DOMAIN`
-   - `VITE_FIREBASE_PROJECT_ID`
-   - `VITE_FIREBASE_STORAGE_BUCKET`
-   - `VITE_FIREBASE_MESSAGING_SENDER_ID`
-   - `VITE_FIREBASE_APP_ID`
-   - `VITE_FIREBASE_DATABASE_ID` (optional; defaults to `(default)` if empty)
-3. **Authorise your GitHub Pages domain**:
-   After deployment, add `username.github.io` under **Firebase Console → Authentication → Settings → Authorised domains**.
-4. **Custom Illustrations (Optional)**:
-   Drop `.webp` illustrations (under 100 KB, ~800 px wide) into `/public/media/{name}.webp` (e.g. `hero-welcome.webp`, `hero-today.webp`, `moves/seated-cat-cow.webp`). Missing assets automatically fall back to the built-in category SVG illustration placeholders.
+## Features & Free-Plan Architecture
 
-## Firestore Security Rules (`firestore.rules`)
+- **100% Rule-Based & Zero Paid APIs**: All daily plans, condition adaptations, and safety checks are computed deterministically on-device with no paid services, Cloud Functions, or runtime AI keys.
+- **Offline-First + Firebase Spark Free Tier**: Works immediately in the browser using IndexedDB (`uid`-scoped local cache) and syncs with **Firebase Authentication** (Google & Anonymous) and **Cloud Firestore** on the free **Spark plan** (no credit card or billing required).
 
-See [`firestore.rules`](./firestore.rules) for the complete user-isolated ruleset enforcing `request.auth != null && request.auth.uid == uid` with strict schema validation.
+## Environment Variables
 
-## Commands
+Configure these in `.env` for local overrides or in **GitHub Settings → Secrets and variables → Actions → Variables** for GitHub Pages builds (falls back to `firebase-applet-config.json` when unset):
 
-- `npm run dev` — Start development server
-- `npx vitest run` — Run unit tests for the rule-based Plan Engine
-- `npm run build` — Build production bundle
+- `VITE_FIREBASE_API_KEY` — Firebase Web API key
+- `VITE_FIREBASE_AUTH_DOMAIN` — Firebase Auth domain (e.g. `your-project.firebaseapp.com`)
+- `VITE_FIREBASE_PROJECT_ID` — Firebase project ID
+- `VITE_FIREBASE_STORAGE_BUCKET` — Firebase storage bucket
+- `VITE_FIREBASE_MESSAGING_SENDER_ID` — Firebase messaging sender ID
+- `VITE_FIREBASE_APP_ID` — Firebase web app ID
+- `VITE_FIREBASE_DATABASE_ID` — Firestore database ID (optional; defaults to `(default)` or the configured named database)
+- `GITHUB_PAGES_BASE` — Base path for subpath hosting (e.g. `/unstill/`, defaults to `/`)
+
+## Setup & Deploying to GitHub Pages
+
+1. **Firebase Spark Setup**:
+   - Create a free Firebase project on the **Spark plan**.
+   - Enable **Authentication** with **Google** and **Anonymous** sign-in providers.
+   - Create a **Cloud Firestore** database and publish the rules from [`firestore.rules`](./firestore.rules).
+2. **GitHub Pages Configuration**:
+   - In your GitHub repository, open **Settings → Pages** and set **Build and deployment → Source** to **GitHub Actions**.
+   - Under **Settings → Secrets and variables → Actions → Variables**, add the `VITE_FIREBASE_*` variables listed above.
+   - Push to `main` (or trigger **Deploy UnStill to GitHub Pages** manually in the **Actions** tab). The workflow automatically builds with `GITHUB_PAGES_BASE=/<repo-name>/` and copies `dist/index.html` to `dist/404.html` so SPA refreshes and deep links work cleanly.
+3. **Authorise Your Domain**:
+   - Add `<username>.github.io` under **Firebase Console → Authentication → Settings → Authorized domains** (and in your Browser API key's allowed HTTP referrers in Google Cloud Console if website restrictions are enabled).
+
+## Local Development Commands
+
+- `npm install` — Install dependencies
+- `npm run dev` — Start local development server at `http://localhost:3000`
+- `npx vitest run` — Run unit tests
+- `npm run build` — Build production bundle (`GITHUB_PAGES_BASE=/unstill/ npm run build` for subpath verification)

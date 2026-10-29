@@ -46,6 +46,7 @@ import {
   getLocalPainLogs,
   fetchCloudPainLogs,
   savePainLog,
+  sortPainLogsNewestFirst,
   getLocalStreaks,
   fetchCloudStreaks,
   saveStreaks,
@@ -453,7 +454,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? `${pendingTask.subtitle} (${Math.round(pendingTask.durationSec / 60)} min)`
           : 'Unclench your shoulders, soften your jaw, and take 3 slow breaths.';
         try {
-          new Notification(title, { body, icon: '/icon.svg' });
+          new Notification(title, { body, icon: `${import.meta.env.BASE_URL}icon.svg` });
         } catch {
           // ignore if Notification constructor restricted on mobile browser
         }
@@ -679,7 +680,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setSchedule(finalSchedule);
 
         const mergedSess = cloudSess || localSess;
-        const mergedPains = cloudPains || localPains;
+        const painById = new Map<string, PainLog>();
+        for (const l of localPains || []) {
+          if (l?.id) painById.set(l.id, l);
+        }
+        for (const l of cloudPains || []) {
+          if (l?.id) painById.set(l.id, l);
+        }
+        const mergedPains = sortPainLogsNewestFirst(Array.from(painById.values()));
         sessionsRef.current = mergedSess;
         setSessions(mergedSess);
         painLogsRef.current = mergedPains;
@@ -1915,16 +1923,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const currentProfile = profileRef.current;
     if (!currentProfile) return;
     const today = getTodayDateString(currentProfile.timeZone);
+    const now = Date.now();
+    const prevMaxTs = painLogsRef.current.reduce(
+      (max, l) => Math.max(max, typeof l.timestamp === 'number' ? l.timestamp : 0),
+      0
+    );
+    const timestamp = Math.max(now, prevMaxTs + 1);
     const log: PainLog = {
-      id: `pain-${Date.now()}`,
+      id: `pain-${timestamp}`,
       date: today,
-      timestamp: Date.now(),
+      timestamp,
       scores,
       stiffness,
       energy,
       notes,
     };
-    const nextPainLogs = [log, ...painLogsRef.current];
+    const nextPainLogs = sortPainLogsNewestFirst([
+      log,
+      ...painLogsRef.current.filter((l) => l.id !== log.id),
+    ]);
     painLogsRef.current = nextPainLogs;
     setPainLogs(nextPainLogs);
 

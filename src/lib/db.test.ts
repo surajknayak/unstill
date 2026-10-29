@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => {
     batchCommitCalls: 0,
     setDocError: null as Error | null,
     batchCommitError: null as Error | null,
+    firestorePainDocs: [] as Array<{ id: string; data: any }>,
   };
 });
 
@@ -206,7 +207,19 @@ vi.mock('firebase/firestore', () => ({
       }),
     };
   }),
-  getDocs: vi.fn(async () => ({ docs: [] })),
+  getDocs: vi.fn(async (ref: any) => {
+    if (ref?.path && String(ref.path).endsWith('/painLogs')) {
+      return {
+        docs: mocks.firestorePainDocs.map((d) => ({
+          id: d.id,
+          data: () => d.data,
+        })),
+      };
+    }
+    return { docs: [] };
+  }),
+  query: vi.fn((colRef: any) => colRef),
+  orderBy: vi.fn((field: string, dir: string) => ({ field, dir })),
   deleteDoc: vi.fn(async () => {}),
   addDoc: vi.fn(async () => {}),
   serverTimestamp: vi.fn(() => Date.now()),
@@ -222,6 +235,10 @@ import {
   fetchCloudProfileDetailed,
   ensureLocalDBHealthy,
   saveSessionLog,
+  savePainLog,
+  getLocalPainLogs,
+  fetchCloudPainLogs,
+  sortPainLogsNewestFirst,
   resetLocalDBConnectionForTest,
   isOnboardingComplete,
   computeResumeOnboardingStep,
@@ -237,6 +254,12 @@ import {
   saveOnboardingDraftForUid,
   getOnboardingDraftForUid,
 } from './db';
+import {
+  selectLatestPainLog,
+  computeInitialPainCheckinState,
+  formatTimeAgo,
+  ONBOARDING_CHECKIN_NOTE,
+} from '../screens/PainCheckinScreen';
 
 describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore profile recovery', () => {
   beforeEach(() => {
@@ -253,6 +276,7 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
     mocks.batchCommitCalls = 0;
     mocks.setDocError = null;
     mocks.batchCommitError = null;
+    mocks.firestorePainDocs = [];
     mocks.currentUser = {
       uid: 'user_returning_123',
       email: 'returning@example.com',
@@ -732,6 +756,135 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
     expect(cloudRes.status).toBe('found');
     expect(cloudRes.profile?.onboardingComplete).toBe(true);
     expect(isOnboardingComplete(cloudRes.profile)).toBe(true);
+  });
+
+  it('PainCheckinScreen: brand-new user with no logs sees Moderate and Steady, and onboarding note is ignored', () => {
+    const today = '2026-10-29';
+    const profile: any = {
+      uid: 'u_new',
+      conditions: ['neck_cs', 'lower_back'],
+      painBaseline: { neck_cs: 4 },
+    };
+
+    // Brand-new user with no logs
+    const latestNone = selectLatestPainLog([], today);
+    expect(latestNone).toBeNull();
+    const initNone = computeInitialPainCheckinState(
+      ['neck_cs', 'lower_back'],
+      latestNone,
+      profile,
+      today
+    );
+    expect(initNone.stiffness).toBe('Moderate');
+    expect(initNone.energy).toBe('Steady');
+    expect(initNone.scores).toEqual({ neck_cs: 4, lower_back: 2 });
+    expect(initNone.notes).toBe('');
+
+    // User with only the synthetic onboarding check-in log
+    const onboardingLog = {
+      id: 'pain-1000',
+      date: today,
+      timestamp: 1000,
+      scores: { neck_cs: 4, lower_back: 3 },
+      stiffness: 'Moderate' as const,
+      energy: 'Steady' as const,
+      notes: ONBOARDING_CHECKIN_NOTE,
+    };
+    const latestOnboarding = selectLatestPainLog([onboardingLog], today);
+    const initOnboarding = computeInitialPainCheckinState(
+      ['neck_cs', 'lower_back'],
+      latestOnboarding,
+      profile,
+      today
+    );
+    expect(initOnboarding.stiffness).toBe('Moderate');
+    expect(initOnboarding.energy).toBe('Steady');
+    expect(initOnboarding.notes).toBe('');
+  });
+
+  it('PainCheckinScreen: saves Stiffness High and Energy Low, keeps same-day history sorted newest first, and persists across reload and sign-out/sign-in', async () => {
+    const uid = 'user_pain_persist';
+    const today = '2026-10-29';
+    mocks.currentUser = { uid, isAnonymous: false };
+
+    const log1 = {
+      id: 'pain-1000',
+      date: today,
+      timestamp: 1000,
+      scores: { neck_cs: 3, lower_back: 2 },
+      stiffness: 'Moderate' as const,
+      energy: 'Steady' as const,
+      notes: 'Morning check',
+    };
+    const log2 = {
+      id: 'pain-2000',
+      date: today,
+      timestamp: 2000,
+      scores: { neck_cs: 6, lower_back: 5 },
+      stiffness: 'High' as const,
+      energy: 'Low' as const,
+      notes: 'Afternoon tightness',
+    };
+
+    await savePainLog(uid, log1);
+    await savePainLog(uid, log2);
+
+    // 1. Local read (close & reopen or reload): both logs exist in history, newest first
+    const localLogs = await getLocalPainLogs(uid);
+    expect(localLogs).toHaveLength(2);
+    expect(localLogs[0].id).toBe('pain-2000');
+    expect(localLogs[1].id).toBe('pain-1000');
+
+    const latestAfterSave = selectLatestPainLog(localLogs, today);
+    const stateSameDay = computeInitialPainCheckinState(
+      ['neck_cs', 'lower_back'],
+      latestAfterSave,
+      null,
+      today
+    );
+    expect(stateSameDay.stiffness).toBe('High');
+    expect(stateSameDay.energy).toBe('Low');
+    expect(stateSameDay.scores).toEqual({ neck_cs: 6, lower_back: 5 });
+    expect(stateSameDay.notes).toBe('Afternoon tightness');
+
+    // 2. Next day open: keeps stiffness, energy, and scores from most recent log, but leaves notes empty
+    const tomorrow = '2026-10-30';
+    const latestNextDay = selectLatestPainLog(localLogs, tomorrow);
+    const stateNextDay = computeInitialPainCheckinState(
+      ['neck_cs', 'lower_back'],
+      latestNextDay,
+      null,
+      tomorrow
+    );
+    expect(stateNextDay.stiffness).toBe('High');
+    expect(stateNextDay.energy).toBe('Low');
+    expect(stateNextDay.scores).toEqual({ neck_cs: 6, lower_back: 5 });
+    expect(stateNextDay.notes).toBe('');
+
+    // 3. Sign out and sign in on another device (Firestore returns logs in arbitrary order):
+    // fetchCloudPainLogs must return logs sorted by timestamp desc so High & Low remain selected
+    await clearSessionCacheOnSignOut(uid);
+    mocks.storeData.clear(); // simulate clean device cache on sign-in
+    mocks.firestorePainDocs = [
+      { id: log1.id, data: log1 },
+      { id: log2.id, data: log2 },
+    ];
+
+    const cloudLogs = await fetchCloudPainLogs(uid);
+    expect(cloudLogs).toHaveLength(2);
+    expect(cloudLogs[0].id).toBe('pain-2000');
+    expect(cloudLogs[0].stiffness).toBe('High');
+    expect(cloudLogs[0].energy).toBe('Low');
+
+    const stateAfterReSignIn = computeInitialPainCheckinState(
+      ['neck_cs', 'lower_back'],
+      selectLatestPainLog(cloudLogs, today),
+      null,
+      today
+    );
+    expect(stateAfterReSignIn.stiffness).toBe('High');
+    expect(stateAfterReSignIn.energy).toBe('Low');
+    expect(formatTimeAgo(2000, 2000 + 5 * 60 * 1000)).toBe('5m ago');
   });
 });
 

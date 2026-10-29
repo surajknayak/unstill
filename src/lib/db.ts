@@ -7,6 +7,8 @@ import {
   writeBatch,
   collection,
   getDocs,
+  query,
+  orderBy,
   deleteDoc,
   addDoc,
   serverTimestamp,
@@ -1035,13 +1037,13 @@ export async function flushPendingSyncQueue(
   return { syncedCount, failedCount };
 }
 
-export function scheduleBackgroundSync(
+export async function scheduleBackgroundSync(
   uid: string,
   collectionName: string,
   docId: string,
   data: any,
   onError?: (msg: string) => void
-) {
+): Promise<void> {
   const cleanData = stripUndefined(data);
   const task: SyncTask = {
     id: `${uid}:${collectionName}_${docId}`,
@@ -1052,7 +1054,9 @@ export function scheduleBackgroundSync(
     updatedAt: Date.now(),
   };
 
-  enqueueSyncTask(task)
+  await enqueueSyncTask(task);
+
+  Promise.resolve()
     .then(() => {
       // Never show "Saved on this device" for a different account
       if (!auth.currentUser || auth.currentUser.uid !== uid) {
@@ -2446,6 +2450,17 @@ export async function getSessionLogs(
 }
 
 // --- PAIN LOGS (UID-KEYED) ---
+export function sortPainLogsNewestFirst(logs: PainLog[]): PainLog[] {
+  return [...logs].sort((a, b) => {
+    const timeDiff = (b.timestamp || 0) - (a.timestamp || 0);
+    if (timeDiff !== 0) return timeDiff;
+    const aIsOnboarding = a.notes === 'Initial onboarding check-in' ? 1 : 0;
+    const bIsOnboarding = b.notes === 'Initial onboarding check-in' ? 1 : 0;
+    if (aIsOnboarding !== bIsOnboarding) return aIsOnboarding - bIsOnboarding;
+    return String(b.id || '').localeCompare(String(a.id || ''));
+  });
+}
+
 async function saveLocalPainLogForUid(uid: string, log: PainLog): Promise<void> {
   const clean = stripUndefined(log);
   const rawId = clean.id.startsWith(`${uid}:`) ? clean.id.slice(uid.length + 1) : clean.id;
@@ -2459,7 +2474,7 @@ async function saveLocalPainLogForUid(uid: string, log: PainLog): Promise<void> 
 
 export async function getLocalPainLogs(uid?: string): Promise<PainLog[]> {
   const logs = await localGetAll<PainLog & { uid?: string; rawId?: string }>('painLogs');
-  return logs
+  const mapped = logs
     .filter((l) => {
       if (!uid) return true;
       if (l.uid) return l.uid === uid;
@@ -2470,8 +2485,8 @@ export async function getLocalPainLogs(uid?: string): Promise<PainLog[]> {
       const { rawId, ...rest } = l;
       const cleanId = rawId || (uid ? String(l.id).replace(new RegExp(`^${uid}:`), '') : l.id);
       return { ...rest, id: cleanId };
-    })
-    .sort((a, b) => b.timestamp - a.timestamp);
+    });
+  return sortPainLogsNewestFirst(mapped);
 }
 
 export async function fetchCloudPainLogs(
@@ -2480,10 +2495,42 @@ export async function fetchCloudPainLogs(
 ): Promise<PainLog[]> {
   if (!auth.currentUser || auth.currentUser.uid !== uid) return getLocalPainLogs(uid);
   try {
-    const snap = await getDocs(collection(firestoreDb, 'users', uid, 'painLogs'));
-    for (const d of snap.docs) {
-      await saveLocalPainLogForUid(uid, d.data() as PainLog);
+    const colRef = collection(firestoreDb, 'users', uid, 'painLogs');
+    let snap;
+    try {
+      const q =
+        typeof query === 'function' && typeof orderBy === 'function'
+          ? query(colRef, orderBy('timestamp', 'desc'))
+          : colRef;
+      snap = await getDocs(q);
+    } catch {
+      snap = await getDocs(colRef);
     }
+    const cloudLogs: PainLog[] = [];
+    for (const d of snap.docs) {
+      const raw = d.data() as PainLog;
+      if (!raw || typeof raw !== 'object') continue;
+      const normalized: PainLog = {
+        ...raw,
+        id: raw.id || d.id,
+        timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : 0,
+      };
+      cloudLogs.push(normalized);
+    }
+    const sortedCloud = sortPainLogsNewestFirst(cloudLogs);
+    for (const log of sortedCloud) {
+      await saveLocalPainLogForUid(uid, log);
+    }
+    const localMerged = await getLocalPainLogs(uid);
+    // Merge sortedCloud + localMerged by id and sort newest first so even if IndexedDB is in fallback mode, all logs are preserved
+    const byId = new Map<string, PainLog>();
+    for (const l of localMerged) {
+      if (l.id) byId.set(l.id, l);
+    }
+    for (const l of sortedCloud) {
+      if (l.id && !byId.has(l.id)) byId.set(l.id, l);
+    }
+    return sortPainLogsNewestFirst(Array.from(byId.values()));
   } catch (e) {
     handleFirestoreError(e, OperationType.LIST, `users/${uid}/painLogs`, onError);
   }
@@ -2497,7 +2544,7 @@ export async function savePainLog(
 ): Promise<void> {
   const clean = stripUndefined(log);
   await saveLocalPainLogForUid(uid, clean);
-  scheduleBackgroundSync(uid, 'painLogs', clean.id, clean, onError);
+  await scheduleBackgroundSync(uid, 'painLogs', clean.id, clean, onError);
 }
 
 export async function getPainLogs(

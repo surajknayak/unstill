@@ -1,4 +1,4 @@
-# Security Specification — Habit Flow
+# Security Specification — UnStill
 
 ## 1. Data Invariants
 1. **Strict User Ownership**: Every document in `/users/{uid}` and its subcollections (`profile`, `schedule`, `plans`, `logs`, `pain`, `meta`, `reports`) belongs strictly to the authenticated user whose `request.auth.uid == uid`.

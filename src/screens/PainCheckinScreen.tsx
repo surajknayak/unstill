@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { GlassCard, PrimaryButton, Chip } from '../components/ui';
 import { X, HeartHandshake, Check, ShieldAlert } from 'lucide-react';
-import { ConditionId } from '../types';
+import { ConditionId, PainLog, UserProfile } from '../types';
+import { getTodayDateString } from '../lib/planEngine';
+import { sortPainLogsNewestFirst } from '../lib/db';
 
 const AREA_LABELS: Record<ConditionId, string> = {
   neck_cs: 'Neck / Cervical',
@@ -18,25 +20,132 @@ const AREA_LABELS: Record<ConditionId, string> = {
   low_energy: 'Fatigue / Stress Tension',
 };
 
+const VALID_STIFFNESS = ['Low', 'Moderate', 'High'] as const;
+const VALID_ENERGY = ['Low', 'Steady', 'Bright'] as const;
+export const ONBOARDING_CHECKIN_NOTE = 'Initial onboarding check-in';
+
+export function selectLatestPainLog(
+  painLogs: PainLog[] | null | undefined,
+  todayDateStr: string
+): PainLog | null {
+  if (!painLogs || painLogs.length === 0) return null;
+  const sorted = sortPainLogsNewestFirst(painLogs);
+  if (sorted.length === 0) return null;
+  const todaysLatest = sorted.find((log) => log.date === todayDateStr);
+  return todaysLatest || sorted[0] || null;
+}
+
+export function computeInitialPainCheckinState(
+  trackedAreas: ConditionId[],
+  latestLog: PainLog | null,
+  profile: UserProfile | null,
+  todayDateStr: string
+): {
+  scores: Record<string, number>;
+  stiffness: 'Low' | 'Moderate' | 'High';
+  energy: 'Low' | 'Steady' | 'Bright';
+  notes: string;
+} {
+  const scores: Record<string, number> = {};
+  trackedAreas.forEach((area) => {
+    const fromLog = latestLog?.scores?.[area];
+    const fromBaseline = profile?.painBaseline?.[area];
+    if (typeof fromLog === 'number' && !Number.isNaN(fromLog)) {
+      scores[area] = fromLog;
+    } else if (typeof fromBaseline === 'number' && !Number.isNaN(fromBaseline)) {
+      scores[area] = fromBaseline;
+    } else {
+      scores[area] = 2;
+    }
+  });
+
+  const stiffness: 'Low' | 'Moderate' | 'High' =
+    latestLog && (VALID_STIFFNESS as readonly string[]).includes(latestLog.stiffness)
+      ? latestLog.stiffness
+      : 'Moderate';
+
+  const energy: 'Low' | 'Steady' | 'Bright' =
+    latestLog && (VALID_ENERGY as readonly string[]).includes(latestLog.energy)
+      ? latestLog.energy
+      : 'Steady';
+
+  const notes =
+    latestLog &&
+    latestLog.date === todayDateStr &&
+    typeof latestLog.notes === 'string' &&
+    latestLog.notes !== ONBOARDING_CHECKIN_NOTE
+      ? latestLog.notes
+      : '';
+
+  return { scores, stiffness, energy, notes };
+}
+
+export function formatTimeAgo(timestamp: number, now: number = Date.now()): string {
+  if (!timestamp || !Number.isFinite(timestamp)) return 'just now';
+  const diffSec = Math.max(0, Math.floor((now - timestamp) / 1000));
+  if (diffSec < 60) return 'just now';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays === 1) return 'yesterday';
+  if (diffDays < 7) return `${diffDays}d ago`;
+  const weeks = Math.floor(diffDays / 7);
+  if (weeks < 5) return `${weeks}w ago`;
+  return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 export const PainCheckinScreen: React.FC = () => {
-  const { profile, savePainCheckin, setShowPainCheckin } = useApp();
+  const { profile, painLogs, savePainCheckin, setShowPainCheckin } = useApp();
 
   const trackedAreas: ConditionId[] =
     profile?.conditions && profile.conditions.length > 0
       ? profile.conditions
       : ['neck_cs', 'lower_back', 'stiff_sitting'];
 
-  const [scores, setScores] = useState<Record<string, number>>(() => {
-    const init: Record<string, number> = {};
-    trackedAreas.forEach((a) => {
-      init[a] = profile?.painBaseline?.[a] ?? 2;
-    });
-    return init;
-  });
+  const today = getTodayDateString(profile?.timeZone);
+  const latestLog = selectLatestPainLog(painLogs, today);
 
-  const [stiffness, setStiffness] = useState<'Low' | 'Moderate' | 'High'>('Moderate');
-  const [energy, setEnergy] = useState<'Low' | 'Steady' | 'Bright'>('Steady');
-  const [notes, setNotes] = useState('');
+  const initialValues = computeInitialPainCheckinState(trackedAreas, latestLog, profile, today);
+
+  const [scores, setScores] = useState<Record<string, number>>(() => initialValues.scores);
+  const [stiffness, setStiffness] = useState<'Low' | 'Moderate' | 'High'>(
+    () => initialValues.stiffness
+  );
+  const [energy, setEnergy] = useState<'Low' | 'Steady' | 'Bright'>(() => initialValues.energy);
+  const [notes, setNotes] = useState<string>(() => initialValues.notes);
+
+  const hasUserModifiedScoresRef = useRef(false);
+  const hasUserModifiedStiffnessRef = useRef(false);
+  const hasUserModifiedEnergyRef = useRef(false);
+  const hasUserModifiedNotesRef = useRef(false);
+
+  useEffect(() => {
+    const nextInit = computeInitialPainCheckinState(trackedAreas, latestLog, profile, today);
+    if (!hasUserModifiedScoresRef.current) {
+      setScores(nextInit.scores);
+    }
+    if (!hasUserModifiedStiffnessRef.current) {
+      setStiffness(nextInit.stiffness);
+    }
+    if (!hasUserModifiedEnergyRef.current) {
+      setEnergy(nextInit.energy);
+    }
+    if (!hasUserModifiedNotesRef.current) {
+      setNotes(nextInit.notes);
+    }
+  }, [
+    latestLog?.id,
+    latestLog?.timestamp,
+    latestLog?.stiffness,
+    latestLog?.energy,
+    latestLog?.notes,
+    today,
+    profile?.uid,
+    profile?.painBaseline,
+    trackedAreas.join(','),
+  ]);
 
   const maxScore = Math.max(0, ...(Object.values(scores) as number[]));
 
@@ -64,6 +173,15 @@ export const PainCheckinScreen: React.FC = () => {
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {latestLog && (
+          <p
+            data-testid="pain-checkin-last-updated"
+            className="text-[11px] font-medium text-[var(--text-soft)] -mt-2"
+          >
+            Last updated: {formatTimeAgo(latestLog.timestamp)}
+          </p>
+        )}
 
         <GlassCard className="p-5 space-y-4">
           <div className="text-xs font-bold uppercase tracking-wider text-[var(--text-soft)]">
@@ -93,9 +211,10 @@ export const PainCheckinScreen: React.FC = () => {
                   min={0}
                   max={10}
                   value={val}
-                  onChange={(e) =>
-                    setScores({ ...scores, [area]: parseInt(e.target.value, 10) })
-                  }
+                  onChange={(e) => {
+                    hasUserModifiedScoresRef.current = true;
+                    setScores({ ...scores, [area]: parseInt(e.target.value, 10) });
+                  }}
                   className="w-full accent-sky-500"
                 />
               </div>
@@ -123,7 +242,10 @@ export const PainCheckinScreen: React.FC = () => {
                   key={s}
                   label={s}
                   selected={stiffness === s}
-                  onClick={() => setStiffness(s)}
+                  onClick={() => {
+                    hasUserModifiedStiffnessRef.current = true;
+                    setStiffness(s);
+                  }}
                   className="flex-1 justify-center"
                 />
               ))}
@@ -141,7 +263,10 @@ export const PainCheckinScreen: React.FC = () => {
                   label={e}
                   color="mint"
                   selected={energy === e}
-                  onClick={() => setEnergy(e)}
+                  onClick={() => {
+                    hasUserModifiedEnergyRef.current = true;
+                    setEnergy(e);
+                  }}
                   className="flex-1 justify-center"
                 />
               ))}
@@ -156,7 +281,10 @@ export const PainCheckinScreen: React.FC = () => {
               type="text"
               placeholder="e.g., Long morning meetings, slept well..."
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
+              onChange={(e) => {
+                hasUserModifiedNotesRef.current = true;
+                setNotes(e.target.value);
+              }}
               className="w-full px-3.5 py-2.5 rounded-2xl bg-white/90 dark:bg-[#0F1B26] border border-slate-200 dark:border-white/15 text-xs font-medium"
             />
           </div>

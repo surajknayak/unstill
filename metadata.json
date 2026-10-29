@@ -1,6 +1,6 @@
 {
   "name": "UnStill",
-  "description": "Self-guided daily movement coach with quick desk resets, gentle workouts, posture checks, and condition care.",
+  "description": "Everyday movement that fits real life. Self-guided daily movement coach with quick desk resets, gentle workouts, posture checks, and condition care.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

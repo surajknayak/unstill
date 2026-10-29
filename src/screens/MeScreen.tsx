@@ -159,7 +159,7 @@ export const MeScreen: React.FC = () => {
         try {
           new Notification('UnStill Reminders Active', {
             body: 'We will gently nudge you during your active hours.',
-            icon: '/icon.svg',
+            icon: `${import.meta.env.BASE_URL}icon.svg`,
           });
         } catch {}
       }
