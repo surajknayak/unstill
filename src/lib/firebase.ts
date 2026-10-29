@@ -6,9 +6,12 @@ import {
   setPersistence,
 } from 'firebase/auth';
 import {
+  initializeFirestore,
   getFirestore,
+  terminate,
   doc,
   getDocFromServer,
+  Firestore,
 } from 'firebase/firestore';
 import appletConfig from '../../firebase-applet-config.json';
 
@@ -31,10 +34,51 @@ export const databaseId =
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(
-  app,
-  import.meta.env.VITE_FIREBASE_DATABASE_ID || appletConfig.firestoreDatabaseId || '(default)'
-);
+
+function createFirestoreInstance(): Firestore {
+  try {
+    return initializeFirestore(
+      app,
+      { experimentalAutoDetectLongPolling: true },
+      databaseId
+    );
+  } catch {
+    return getFirestore(app, databaseId);
+  }
+}
+
+export let db: Firestore = createFirestoreInstance();
+
+let resettingFirestorePromise: Promise<Firestore> | null = null;
+
+/**
+ * Terminates the current Firestore instance and recreates it with
+ * experimentalAutoDetectLongPolling: true when stalled streams or consecutive
+ * sync failures occur.
+ */
+export async function resetFirestoreConnection(): Promise<Firestore> {
+  if (resettingFirestorePromise) {
+    return resettingFirestorePromise;
+  }
+  resettingFirestorePromise = (async () => {
+    try {
+      if (typeof terminate === 'function') {
+        await Promise.race([
+          terminate(db),
+          new Promise((resolve) => setTimeout(resolve, 1500)),
+        ]);
+      }
+    } catch (err) {
+      console.warn('[UnStill Firebase] terminate(db) warning:', err);
+    }
+    db = createFirestoreInstance();
+    return db;
+  })().finally(() => {
+    resettingFirestorePromise = null;
+  });
+  return resettingFirestorePromise;
+}
+
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.addScope('profile');
 googleProvider.addScope('email');

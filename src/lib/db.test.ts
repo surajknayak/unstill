@@ -22,6 +22,9 @@ const mocks = vi.hoisted(() => {
     batchCommitCalls: 0,
     setDocError: null as Error | null,
     batchCommitError: null as Error | null,
+    setDocDelayMs: 0,
+    batchCommitDelayMs: 0,
+    resetConnectionCalls: 0,
     firestorePainDocs: [] as Array<{ id: string; data: any }>,
   };
 });
@@ -165,6 +168,10 @@ vi.mock('./firebase', () => ({
       return mocks.currentUser;
     },
   },
+  resetFirestoreConnection: vi.fn(async () => {
+    mocks.resetConnectionCalls += 1;
+    return { __mockFirestore: true };
+  }),
 }));
 
 vi.mock('firebase/firestore', () => ({
@@ -187,6 +194,9 @@ vi.mock('firebase/firestore', () => ({
     };
   }),
   setDoc: vi.fn(async (ref: { path: string }, data: any, options: any) => {
+    if (mocks.setDocDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, mocks.setDocDelayMs));
+    }
     if (mocks.setDocError) {
       throw mocks.setDocError;
     }
@@ -199,6 +209,9 @@ vi.mock('firebase/firestore', () => ({
         staged.push({ path: ref.path, data, options });
       }),
       commit: vi.fn(async () => {
+        if (mocks.batchCommitDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, mocks.batchCommitDelayMs));
+        }
         if (mocks.batchCommitError) {
           throw mocks.batchCommitError;
         }
@@ -253,6 +266,10 @@ import {
   hasLegacyOnboardingCompletionEvidence,
   saveOnboardingDraftForUid,
   getOnboardingDraftForUid,
+  waitForSyncQueueIdle,
+  getLastSyncTime,
+  getLastSyncError,
+  setFirestoreWriteTimeoutForTest,
 } from './db';
 import {
   selectLatestPainLog,
@@ -276,6 +293,9 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
     mocks.batchCommitCalls = 0;
     mocks.setDocError = null;
     mocks.batchCommitError = null;
+    mocks.setDocDelayMs = 0;
+    mocks.batchCommitDelayMs = 0;
+    mocks.resetConnectionCalls = 0;
     mocks.firestorePainDocs = [];
     mocks.currentUser = {
       uid: 'user_returning_123',
@@ -470,74 +490,115 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
     expect(computeResumeOnboardingStep(cloudRes.profile)).toBe(2);
   });
 
-  it('saves onboarding steps progressively with merge:true and queues retry + returns real error on failure', async () => {
+  it('saves onboarding steps locally first (< 300 ms) without awaiting Firestore and syncs with merge:true in background', async () => {
+    const start1 = Date.now();
     const step1Res = await saveOnboardingStepProgress('user_returning_123', 2, {
       name: 'Suraj',
       ageBand: '25–34',
       sex: 'Male',
       timeZone: 'Asia/Kolkata',
     });
+    const elapsed1 = Date.now() - start1;
 
     expect(step1Res.ok).toBe(true);
+    expect(elapsed1).toBeLessThan(300);
+    await waitForSyncQueueIdle();
+
     expect(mocks.setDocCalls).toHaveLength(1);
     expect(mocks.setDocCalls[0].path).toBe('users/user_returning_123');
     expect(mocks.setDocCalls[0].options).toEqual({ merge: true });
     expect(mocks.setDocCalls[0].data.onboardingStep).toBe(2);
     expect(getLastWriteResult().status).toBe('success');
+    expect(getLastSyncTime()).not.toBeNull();
+    expect(getLastSyncError()).toBeNull();
 
-    // Simulate a Firestore error on Step 2 -> 3
+    // Simulate a Firestore error on Step 2 -> 3: local save still returns { ok: true } immediately
     mocks.setDocError = new Error('PERMISSION_DENIED: Missing or insufficient permissions.');
+    const start2 = Date.now();
     const step2Res = await saveOnboardingStepProgress('user_returning_123', 3, {
       habitType: 'Move more',
       sittingHoursPerDay: 8,
       currentActiveDays: 2,
     });
+    expect(step2Res.ok).toBe(true);
+    expect(Date.now() - start2).toBeLessThan(300);
 
-    expect(step2Res.ok).toBe(false);
-    expect(step2Res.error).toContain('PERMISSION_DENIED');
+    await waitForSyncQueueIdle();
     expect(getLastWriteResult().status).toBe('error');
-    expect(getLastWriteResult().error).toContain('PERMISSION_DENIED');
+    expect(getLastSyncError()).toContain('PERMISSION_DENIED');
     expect(await getQueuedWritesCount('user_returning_123')).toBeGreaterThanOrEqual(1);
 
-    // Local profile still kept the answers and updated onboardingStep to 3
+    // Local profile kept the answers and updated onboardingStep to 3
     const localAfterError = await getLocalProfile('user_returning_123');
     expect(localAfterError?.habitType).toBe('Move more');
     expect(localAfterError?.sittingHoursPerDay).toBe(8);
     expect(localAfterError?.onboardingStep).toBe(3);
   });
 
-  it('writes users/{uid} and users/{uid}/meta/main in one atomic writeBatch on final onboarding step', async () => {
-    const now = Date.now();
-    const fullProfile: any = {
-      uid: 'user_returning_123',
+  it('advances every onboarding step and final plan in under 500 ms when Firestore is stalled/blocked, resets connection after 2 failures, and syncs to Firestore when network returns', async () => {
+    const uid = 'user_stalled_network_123';
+    mocks.currentUser = { uid, isAnonymous: false };
+    setFirestoreWriteTimeoutForTest(60);
+
+    // Simulate stalled/blocked Firestore (> 5000 ms delay or network error)
+    mocks.setDocDelayMs = 5000;
+    mocks.batchCommitDelayMs = 5000;
+
+    // Step 1 -> 2 advances in < 500 ms without waiting on stalled network
+    const tStep1 = Date.now();
+    const res1 = await saveOnboardingStepProgress(uid, 2, {
       name: 'Suraj',
       ageBand: '25–34',
       sex: 'Male',
       timeZone: 'Asia/Kolkata',
+    });
+    expect(res1.ok).toBe(true);
+    expect(Date.now() - tStep1).toBeLessThan(500);
+
+    // Step 2 -> 3 advances in < 500 ms and merges idempotently in syncQueue
+    const tStep2 = Date.now();
+    const res2 = await saveOnboardingStepProgress(uid, 3, {
       habitType: 'All of the above',
       sittingHoursPerDay: 7,
       currentActiveDays: 3,
-      level: 'Steady',
-      goal: 'Ease stiffness',
+    });
+    expect(res2.ok).toBe(true);
+    expect(Date.now() - tStep2).toBeLessThan(500);
+
+    // Step 3 -> 8 answers
+    const tStep3 = Date.now();
+    const res3 = await saveOnboardingStepProgress(uid, 8, {
       conditions: ['neck_cs', 'lower_back'],
       painBaseline: { neck_cs: 4, lower_back: 3 },
       painDuration: { neck_cs: 'Few weeks', lower_back: 'Few days' },
       gettingWorse: { neck_cs: false, lower_back: false },
-      safetyFlags: [],
       pregnantOrPostpartum: false,
       doctorAdviceToAvoid: false,
       recentSurgery: false,
+      workStart: '09:30',
+      workEnd: '18:00',
+      workType: 'Desk / laptop',
+      remindersPerDay: 4,
+      daysOff: [0, 6],
+      location: 'At desk',
+      equipment: ['Chair / Desk'],
+      level: 'Steady',
+      goal: 'Ease stiffness',
       cheerStyle: 'Warm & celebratory',
-      theme: 'light',
-      reducedMotion: false,
-      soundHaptics: true,
+    });
+    expect(res3.ok).toBe(true);
+    expect(Date.now() - tStep3).toBeLessThan(500);
+
+    const now = Date.now();
+    const fullProfile: any = {
+      ...res3.profile,
+      uid,
       planVersion: 1,
       onboardingComplete: true,
       onboardingCompletedAt: now,
       createdAt: now,
       updatedAt: now,
     };
-
     const fullSchedule: any = {
       workStart: '09:30',
       workEnd: '18:00',
@@ -549,7 +610,6 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
       equipment: ['Chair / Desk'],
       location: 'At desk',
     };
-
     const metaMain = {
       planSummary: {
         whyThisPlan: 'Tailored for neck & lower back comfort',
@@ -575,9 +635,8 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
       planVersion: 1,
       updatedAt: now,
     };
-
     const initialPlan: any = {
-      date: '2026-10-28',
+      date: '2026-10-29',
       tasks: [],
       completedCount: 0,
       totalCount: 4,
@@ -587,7 +646,6 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
       steps: 0,
       stepGoal: 6500,
     };
-
     const initialStreaks: any = {
       currentStreak: 0,
       bestStreak: 0,
@@ -598,10 +656,10 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
       badges: ['First Step'],
     };
 
-    // 1. Test failure handling: if batch fails, do not mark onboardingComplete true
-    mocks.batchCommitError = new Error('Firestore batch rejected by security rules');
-    const failedBatch = await completeOnboardingBatch(
-      'user_returning_123',
+    // Final plan step returns { ok: true } immediately (< 500 ms) with onboardingComplete: true locally
+    const tFinal = Date.now();
+    const finalRes = await completeOnboardingBatch(
+      uid,
       fullProfile,
       fullSchedule,
       metaMain,
@@ -610,39 +668,43 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
       null,
       false
     );
-    expect(failedBatch.ok).toBe(false);
-    expect(failedBatch.error).toContain('Firestore batch rejected');
-    expect(failedBatch.profile.onboardingComplete).toBe(false);
-    expect(failedBatch.profile.onboardingStep).toBe(8);
+    expect(finalRes.ok).toBe(true);
+    expect(finalRes.profile.onboardingComplete).toBe(true);
+    expect(Date.now() - tFinal).toBeLessThan(500);
 
-    // 2. Test success: batch commits both users/{uid} and users/{uid}/meta/main
+    // Wait for background stalled attempts to time out and trigger resetFirestoreConnection after 2 consecutive failures
+    await waitForSyncQueueIdle();
+    expect(mocks.resetConnectionCalls).toBeGreaterThanOrEqual(1);
+    expect(getLastSyncError()).toContain('timed out');
+    expect(await getQueuedWritesCount(uid)).toBeGreaterThan(0);
+
+    // Now network returns (fast & healthy): flushPendingSyncQueue writes users/{uid} (onboardingComplete: true + all answers) and users/{uid}/meta/main
+    mocks.setDocDelayMs = 0;
+    mocks.batchCommitDelayMs = 0;
+    mocks.setDocError = null;
     mocks.batchCommitError = null;
-    const okBatch = await completeOnboardingBatch(
-      'user_returning_123',
-      fullProfile,
-      fullSchedule,
-      metaMain,
-      initialPlan,
-      initialStreaks,
-      null,
-      false
-    );
-    expect(okBatch.ok).toBe(true);
-    expect(okBatch.profile.onboardingComplete).toBe(true);
-    expect(mocks.batchCommitCalls).toBe(1);
-    expect(mocks.batchSetCalls.map((c) => c.path)).toEqual(
-      expect.arrayContaining(['users/user_returning_123', 'users/user_returning_123/meta/main'])
-    );
 
-    const userBatchWrite = mocks.batchSetCalls.find((c) => c.path === 'users/user_returning_123')!;
+    const flushRes = await flushPendingSyncQueue(uid);
+    expect(flushRes.failedCount).toBe(0);
+    expect(flushRes.syncedCount).toBeGreaterThan(0);
+    expect(await getQueuedWritesCount(uid)).toBe(0);
+    expect(getLastSyncTime()).not.toBeNull();
+    expect(getLastSyncError()).toBeNull();
+
+    const userBatchWrite = mocks.batchSetCalls.find((c) => c.path === `users/${uid}`)!;
+    expect(userBatchWrite).toBeDefined();
+    expect(userBatchWrite.options).toEqual({ merge: true });
     expect(userBatchWrite.data.onboardingComplete).toBe(true);
+    expect(userBatchWrite.data.name).toBe('Suraj');
+    expect(userBatchWrite.data.ageBand).toBe('25–34');
     expect(userBatchWrite.data.conditions).toEqual(['neck_cs', 'lower_back']);
     expect(userBatchWrite.data.workStart).toBe('09:30');
     expect(userBatchWrite.data.equipment).toEqual(['Chair / Desk']);
 
     const metaBatchWrite = mocks.batchSetCalls.find(
-      (c) => c.path === 'users/user_returning_123/meta/main'
+      (c) => c.path === `users/${uid}/meta/main`
     )!;
+    expect(metaBatchWrite).toBeDefined();
     expect(metaBatchWrite.data.monthlyTheme).toBe('Ease stiffness');
     expect(metaBatchWrite.data.planSummary.level).toBe('Steady');
     expect(metaBatchWrite.data.weeklyRhythm.remindersPerDay).toBe(4);
@@ -669,6 +731,7 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
       createdAt: 1000,
       updatedAt: 1000,
     });
+    await waitForSyncQueueIdle();
     saveOnboardingDraftForUid(uidA, { name: 'Account A', ageBand: '25–34' });
 
     // Account B has nothing saved yet — must not see Account A's profile or draft
@@ -678,8 +741,10 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
     // Queue a failed write for Account A and one for Account B
     mocks.setDocError = new Error('Simulated offline failure');
     await saveOnboardingStepProgress(uidA, 2, { name: 'Account A', ageBand: '25–34' });
+    await waitForSyncQueueIdle();
     mocks.currentUser = { uid: uidB, isAnonymous: false };
     await saveOnboardingStepProgress(uidB, 2, { name: 'Account B', ageBand: '35–44' });
+    await waitForSyncQueueIdle();
     mocks.setDocError = null;
 
     // Sign out of Account A: clears cached profile & draft of Account A, keeps queued write under uidA

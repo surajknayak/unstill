@@ -30,6 +30,8 @@ import {
   getQueuedWritesList,
   getAllQueuedWritesDebugSummary,
   getLastReadWriteError,
+  getLastSyncTime,
+  getLastSyncError,
   LastReadWriteErrorInfo,
   isOnboardingComplete,
   computeResumeOnboardingStep,
@@ -93,6 +95,10 @@ export const MeScreen: React.FC = () => {
   const [debugLastError, setDebugLastError] = useState<LastReadWriteErrorInfo | null>(() =>
     getLastReadWriteError()
   );
+  const [debugLastSyncTime, setDebugLastSyncTime] = useState<number | null>(() => getLastSyncTime());
+  const [debugLastSyncError, setDebugLastSyncError] = useState<string | null>(() =>
+    getLastSyncError()
+  );
   const [debugQueuedWrites, setDebugQueuedWrites] = useState<SyncTask[]>([]);
   const [debugQueueSummary, setDebugQueueSummary] = useState<{
     totalCount: number;
@@ -112,11 +118,15 @@ export const MeScreen: React.FC = () => {
     const refreshDebug = async () => {
       const lw = getLastWriteResult();
       const le = getLastReadWriteError();
+      const lst = getLastSyncTime();
+      const lse = getLastSyncError();
       const q = await getQueuedWritesList(user?.uid);
       const summary = await getAllQueuedWritesDebugSummary();
       if (active) {
         setDebugLastWrite(lw);
         setDebugLastError(le);
+        setDebugLastSyncTime(lst);
+        setDebugLastSyncError(lse);
         setDebugQueuedWrites(q);
         setDebugQueueSummary(summary);
       }
@@ -137,6 +147,8 @@ export const MeScreen: React.FC = () => {
       setVersionTapCount(0);
       setDebugLastWrite(getLastWriteResult());
       setDebugLastError(getLastReadWriteError());
+      setDebugLastSyncTime(getLastSyncTime());
+      setDebugLastSyncError(getLastSyncError());
       setDebugQueuedWrites(await getQueuedWritesList(user?.uid));
       setDebugQueueSummary(await getAllQueuedWritesDebugSummary());
     }
@@ -609,8 +621,8 @@ export const MeScreen: React.FC = () => {
                 <span className="text-[var(--text-soft)]">databaseId:</span> {databaseId}
               </div>
               <div>
-                <span className="text-[var(--text-soft)]">queuedWrites:</span>{' '}
-                {debugQueueSummary.totalCount} (uids:{' '}
+                <span className="text-[var(--text-soft)]">queuedWritesCount:</span>{' '}
+                {debugQueuedWrites.length} (total: {debugQueueSummary.totalCount}, uids:{' '}
                 {debugQueueSummary.uids.length > 0 ? debugQueueSummary.uids.join(', ') : 'none'})
                 {debugQueuedWrites.length > 0 && (
                   <span className="text-[var(--text-soft)]">
@@ -618,6 +630,14 @@ export const MeScreen: React.FC = () => {
                     [{debugQueuedWrites.map((q) => `${q.collectionName}/${q.docId}`).join(', ')}]
                   </span>
                 )}
+              </div>
+              <div>
+                <span className="text-[var(--text-soft)]">lastSyncTime:</span>{' '}
+                {debugLastSyncTime ? new Date(debugLastSyncTime).toISOString() : 'none'}
+              </div>
+              <div>
+                <span className="text-[var(--text-soft)]">lastSyncError:</span>{' '}
+                {debugLastSyncError || 'none'}
               </div>
               <div>
                 <span className="text-[var(--text-soft)]">lastReadWriteError:</span>{' '}
@@ -652,8 +672,13 @@ export const MeScreen: React.FC = () => {
                       profile.onboardingStep ?? computeResumeOnboardingStep(profile),
                     onboardingComplete: isOnboardingComplete(profile),
                     databaseId,
-                    queuedWritesCount: debugQueueSummary.totalCount,
+                    queuedWritesCount: debugQueuedWrites.length,
+                    totalQueuedWritesCount: debugQueueSummary.totalCount,
                     queuedWriteUids: debugQueueSummary.uids,
+                    lastSyncTime: debugLastSyncTime
+                      ? new Date(debugLastSyncTime).toISOString()
+                      : null,
+                    lastSyncError: debugLastSyncError || null,
                     lastReadWriteError: debugLastError
                       ? {
                           ...debugLastError,

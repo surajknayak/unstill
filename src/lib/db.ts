@@ -13,7 +13,7 @@ import {
   addDoc,
   serverTimestamp,
 } from 'firebase/firestore';
-import { db as firestoreDb, auth } from './firebase';
+import { db as firestoreDb, auth, resetFirestoreConnection } from './firebase';
 import {
   UserProfile,
   SchedulePrefs,
@@ -248,6 +248,42 @@ function closeActiveDBConnection() {
   dbPromise = null;
 }
 
+export const IDB_TIMEOUT_MS = 2000;
+let firestoreWriteTimeoutMs = 8000;
+
+export function setFirestoreWriteTimeoutForTest(ms: number) {
+  firestoreWriteTimeoutMs = ms;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(message));
+      }
+    }, timeoutMs);
+
+    promise.then(
+      (val) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(val);
+        }
+      },
+      (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      }
+    );
+  });
+}
+
 export function resetLocalDBConnectionForTest() {
   closeActiveDBConnection();
   repairPromise = null;
@@ -255,10 +291,17 @@ export function resetLocalDBConnectionForTest() {
   memoryFallbackStores.clear();
   lastWriteResultState = { status: 'idle', path: '', timestamp: 0, error: null };
   lastReadWriteErrorState = null;
+  lastSyncTimeState = null;
+  lastSyncErrorState = null;
+  consecutiveSyncFailures = 0;
+  activeQueueFlushChain = Promise.resolve();
+  firestoreWriteTimeoutMs = 8000;
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem('hf_last_write_result');
       localStorage.removeItem('hf_last_rw_error');
+      localStorage.removeItem('hf_last_sync_time');
+      localStorage.removeItem('hf_last_sync_error');
     }
   } catch {
     // ignore
@@ -428,18 +471,35 @@ export async function repairLocalCacheDB(): Promise<IDBPDatabase | null> {
 
 /**
  * Checks whether all required stores exist in IndexedDB; if any are missing, repairs the local cache DB.
+ * Bounded by a 2-second timeout so stalled IndexedDB never blocks the UI.
  */
 export async function ensureLocalDBHealthy(): Promise<void> {
   if (isUsingMemoryFallback) return;
   try {
-    const db = await getLocalDB();
+    const db = await withTimeout(
+      getLocalDB(),
+      IDB_TIMEOUT_MS,
+      'IndexedDB open timed out after 2s'
+    );
     const missingStore = OBJECT_STORE_NAMES.some((name) => !db.objectStoreNames.contains(name));
     if (missingStore) {
-      await repairLocalCacheDB();
+      await withTimeout(
+        repairLocalCacheDB(),
+        IDB_TIMEOUT_MS,
+        'IndexedDB repair timed out after 2s'
+      );
     }
   } catch (err) {
     if (isMissingStoreOrCorruptedError(err)) {
-      await repairLocalCacheDB();
+      try {
+        await withTimeout(
+          repairLocalCacheDB(),
+          IDB_TIMEOUT_MS,
+          'IndexedDB repair timed out after 2s'
+        );
+      } catch {
+        isUsingMemoryFallback = true;
+      }
     } else {
       isUsingMemoryFallback = true;
     }
@@ -447,11 +507,12 @@ export async function ensureLocalDBHealthy(): Promise<void> {
 }
 
 /**
- * Central transaction helper: wraps every IndexedDB operation.
+ * Central transaction helper: wraps every IndexedDB operation with a 2-second timeout.
  * - Verifies target objectStore exists; if missing or NotFoundError/corrupted is thrown,
  *   closes the DB, deletes only the local cache DB, recreates it with the current schema,
  *   and retries once.
- * - If IndexedDB is unavailable (private mode, blocked), seamlessly falls back to in-memory storage.
+ * - If IndexedDB is unavailable (private mode, blocked) or takes longer than 2s,
+ *   seamlessly falls back to in-memory storage.
  */
 async function runWithStore<T>(
   storeName: ObjectStoreName,
@@ -463,30 +524,45 @@ async function runWithStore<T>(
   }
 
   try {
-    let db = await getLocalDB();
-    if (!db.objectStoreNames.contains(storeName)) {
-      const repaired = await repairLocalCacheDB();
-      if (!repaired) {
-        return memOp(getMemoryStore(storeName));
-      }
-      db = repaired;
-    }
-    return await idbOp(db);
-  } catch (err) {
-    if (isMissingStoreOrCorruptedError(err)) {
-      const repaired = await repairLocalCacheDB();
-      if (repaired && !isUsingMemoryFallback) {
-        try {
-          return await idbOp(repaired);
-        } catch {
-          isUsingMemoryFallback = true;
-          return memOp(getMemoryStore(storeName));
+    return await withTimeout(
+      (async () => {
+        let db = await getLocalDB();
+        if (!db.objectStoreNames.contains(storeName)) {
+          const repaired = await repairLocalCacheDB();
+          if (!repaired) {
+            return memOp(getMemoryStore(storeName));
+          }
+          db = repaired;
         }
+        return await idbOp(db);
+      })(),
+      IDB_TIMEOUT_MS,
+      `IndexedDB operation on "${storeName}" timed out after 2s`
+    );
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (!errMsg.includes('timed out') && isMissingStoreOrCorruptedError(err)) {
+      try {
+        const repaired = await withTimeout(
+          repairLocalCacheDB(),
+          IDB_TIMEOUT_MS,
+          'IndexedDB repair timed out after 2s'
+        );
+        if (repaired && !isUsingMemoryFallback) {
+          return await withTimeout(
+            idbOp(repaired),
+            IDB_TIMEOUT_MS,
+            `IndexedDB retry on "${storeName}" timed out after 2s`
+          );
+        }
+      } catch {
+        isUsingMemoryFallback = true;
+        return memOp(getMemoryStore(storeName));
       }
       return memOp(getMemoryStore(storeName));
     }
 
-    // Any other IndexedDB availability error (e.g. private browsing SecurityError / QuotaExceededError)
+    // Any other IndexedDB availability or timeout error
     console.warn(`[UnStill DB] Falling back to in-memory store for "${storeName}":`, err);
     isUsingMemoryFallback = true;
     return memOp(getMemoryStore(storeName));
@@ -667,6 +743,93 @@ let lastReadWriteErrorState: LastReadWriteErrorInfo | null = (() => {
   return null;
 })();
 
+let lastSyncTimeState: number | null = (() => {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem('hf_last_sync_time');
+      if (raw) {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          return parsed;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+})();
+
+let lastSyncErrorState: string | null = (() => {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem('hf_last_sync_error');
+      if (raw) return raw;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+})();
+
+let consecutiveSyncFailures = 0;
+let activeQueueFlushChain: Promise<any> = Promise.resolve();
+
+export function getLastSyncTime(): number | null {
+  return lastSyncTimeState;
+}
+
+export function getLastSyncError(): string | null {
+  return lastSyncErrorState;
+}
+
+export function getConsecutiveSyncFailures(): number {
+  return consecutiveSyncFailures;
+}
+
+export async function waitForSyncQueueIdle(): Promise<void> {
+  try {
+    await activeQueueFlushChain;
+  } catch {
+    // ignore background queue errors
+  }
+}
+
+function recordSyncSuccess() {
+  const now = Date.now();
+  lastSyncTimeState = now;
+  lastSyncErrorState = null;
+  consecutiveSyncFailures = 0;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('hf_last_sync_time', String(now));
+      localStorage.removeItem('hf_last_sync_error');
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function recordSyncFailureAndMaybeReset(errorMsg: string) {
+  lastSyncErrorState = errorMsg;
+  consecutiveSyncFailures += 1;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('hf_last_sync_error', errorMsg);
+    }
+  } catch {
+    // ignore
+  }
+  if (consecutiveSyncFailures >= 2) {
+    consecutiveSyncFailures = 0;
+    try {
+      await resetFirestoreConnection();
+    } catch (err) {
+      console.warn('[UnStill CloudSync] Failed resetting Firestore connection:', err);
+    }
+  }
+}
+
 export function recordReadWriteError(
   operation: 'read' | 'write',
   path: string,
@@ -750,7 +913,7 @@ function handleFirestoreError(
       timestamp: Date.now(),
       error: rawMessage,
     });
-    if (onError) onError('Saved on this device, will sync later');
+    if (onError) onError('Saved on this device, will sync');
   } else if (onError) {
     onError(rawMessage);
   }
@@ -863,13 +1026,53 @@ export interface SyncTask {
   updatedAt: number;
 }
 
+function readBackupSyncQueueForUid(uid: string): SyncTask[] {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(`${uid}:sync_queue`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((t) => t && t.uid === uid && t.id) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeBackupSyncQueueForUid(uid: string, tasks: SyncTask[]) {
+  try {
+    if (typeof localStorage === 'undefined' || !uid) return;
+    const forUid = tasks.filter((t) => t && t.uid === uid);
+    if (forUid.length === 0) {
+      localStorage.removeItem(`${uid}:sync_queue`);
+    } else {
+      localStorage.setItem(`${uid}:sync_queue`, JSON.stringify(forUid));
+    }
+  } catch {
+    // ignore quota errors
+  }
+}
+
 export async function getQueuedWritesList(uid?: string): Promise<SyncTask[]> {
   try {
     const all = await localGetAll<SyncTask>('syncQueue');
-    if (!uid) return all;
-    return all.filter((t) => t.uid === uid);
+    const byId = new Map<string, SyncTask>();
+    for (const item of all) {
+      if (item && item.id) {
+        byId.set(item.id, item);
+      }
+    }
+    if (uid) {
+      const backup = readBackupSyncQueueForUid(uid);
+      for (const item of backup) {
+        if (!byId.has(item.id)) {
+          byId.set(item.id, item);
+        }
+      }
+      return Array.from(byId.values()).filter((t) => t.uid === uid);
+    }
+    return Array.from(byId.values());
   } catch {
-    return [];
+    return uid ? readBackupSyncQueueForUid(uid) : [];
   }
 }
 
@@ -879,7 +1082,7 @@ export async function getAllQueuedWritesDebugSummary(): Promise<{
   tasks: SyncTask[];
 }> {
   try {
-    const all = await localGetAll<SyncTask>('syncQueue');
+    const all = await getQueuedWritesList();
     const uids = Array.from(new Set(all.map((t) => t.uid).filter(Boolean)));
     return { totalCount: all.length, uids, tasks: all };
   } catch {
@@ -892,15 +1095,38 @@ export async function getQueuedWritesCount(uid?: string): Promise<number> {
   return list.length;
 }
 
+/**
+ * Idempotent queue writer: merges payloads when a task with the same document id
+ * (`${uid}:${collectionName}_${docId}`) already exists in `syncQueue`, and persists
+ * across reloads in both IndexedDB and localStorage backup.
+ */
 async function enqueueSyncTask(task: SyncTask) {
-  const cleanTask = stripUndefined({
+  const normalizedId = task.id.startsWith(`${task.uid}:`) ? task.id : `${task.uid}:${task.id}`;
+  const existing = await localGet<SyncTask>('syncQueue', normalizedId);
+  const mergedData =
+    existing &&
+    existing.data &&
+    typeof existing.data === 'object' &&
+    !Array.isArray(existing.data) &&
+    task.data &&
+    typeof task.data === 'object' &&
+    !Array.isArray(task.data)
+      ? stripUndefined({ ...existing.data, ...task.data })
+      : stripUndefined(task.data);
+
+  const cleanTask: SyncTask = stripUndefined({
     ...task,
-    id: task.id.startsWith(`${task.uid}:`) ? task.id : `${task.uid}:${task.id}`,
+    id: normalizedId,
+    data: mergedData,
+    updatedAt: Math.max(task.updatedAt || Date.now(), existing?.updatedAt || 0),
   });
+
   await localPut('syncQueue', cleanTask);
   if (task.collectionName === '__top_reports__') {
     await localPut('reportsQueue', cleanTask);
   }
+  const currentForUid = await localGetAll<SyncTask>('syncQueue');
+  writeBackupSyncQueueForUid(task.uid, currentForUid);
 }
 
 async function removeSyncTask(id: string, uid?: string) {
@@ -910,12 +1136,16 @@ async function removeSyncTask(id: string, uid?: string) {
     await localDelete('syncQueue', `${uid}:${id}`);
     await localDelete('reportsQueue', `${uid}:${id}`);
   }
+  if (uid) {
+    const currentForUid = await localGetAll<SyncTask>('syncQueue');
+    writeBackupSyncQueueForUid(uid, currentForUid);
+  }
 }
 
 async function syncDocWithRetry(
   task: SyncTask,
   onError?: (msg: string) => void,
-  maxRetries = 2
+  maxRetries = 0
 ): Promise<boolean> {
   // Requirement A.3: A queued write may ONLY be replayed when its uid equals the signed-in uid
   if (!auth.currentUser || auth.currentUser.uid !== task.uid) {
@@ -929,16 +1159,23 @@ async function syncDocWithRetry(
     const path = 'reports';
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        await addDoc(collection(firestoreDb, 'reports'), {
-          uid: auth.currentUser.uid,
-          category: cleanData.category,
-          message: String(cleanData.message || '').slice(0, 500),
-          ...(cleanData.appVersion ? { appVersion: cleanData.appVersion } : {}),
-          createdAt: serverTimestamp(),
-        });
+        await withTimeout(
+          addDoc(collection(firestoreDb, 'reports'), {
+            uid: auth.currentUser.uid,
+            category: cleanData.category,
+            message: String(cleanData.message || '').slice(0, 500),
+            ...(cleanData.appVersion ? { appVersion: cleanData.appVersion } : {}),
+            createdAt: serverTimestamp(),
+          }),
+          firestoreWriteTimeoutMs,
+          'Firestore write timed out'
+        );
         await removeSyncTask(task.id, task.uid);
+        recordSyncSuccess();
         return true;
       } catch (e) {
+        const rawErr = e instanceof Error ? e.message : String(e);
+        await recordSyncFailureAndMaybeReset(rawErr);
         if (attempt === maxRetries) {
           handleFirestoreError(e, OperationType.CREATE, path, onError);
           return false;
@@ -954,10 +1191,15 @@ async function syncDocWithRetry(
     const path = `users/${task.uid}`;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        await setDoc(doc(firestoreDb, 'users', task.uid), cleanData, {
-          merge: true,
-        });
+        await withTimeout(
+          setDoc(doc(firestoreDb, 'users', task.uid), cleanData, {
+            merge: true,
+          }),
+          firestoreWriteTimeoutMs,
+          `Firestore write to ${path} timed out`
+        );
         await removeSyncTask(task.id, task.uid);
+        recordSyncSuccess();
         recordWriteResult({
           status: 'success',
           operation: 'write',
@@ -967,6 +1209,8 @@ async function syncDocWithRetry(
         });
         return true;
       } catch (e) {
+        const rawErr = e instanceof Error ? e.message : String(e);
+        await recordSyncFailureAndMaybeReset(rawErr);
         if (attempt === maxRetries) {
           handleFirestoreError(e, OperationType.WRITE, path, onError);
           return false;
@@ -980,10 +1224,15 @@ async function syncDocWithRetry(
   const path = `users/${task.uid}/${task.collectionName}/${task.docId}`;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      await setDoc(doc(firestoreDb, 'users', task.uid, task.collectionName, task.docId), cleanData, {
-        merge: true,
-      });
+      await withTimeout(
+        setDoc(doc(firestoreDb, 'users', task.uid, task.collectionName, task.docId), cleanData, {
+          merge: true,
+        }),
+        firestoreWriteTimeoutMs,
+        `Firestore write to ${path} timed out`
+      );
       await removeSyncTask(task.id, task.uid);
+      recordSyncSuccess();
       recordWriteResult({
         status: 'success',
         operation: 'write',
@@ -993,6 +1242,8 @@ async function syncDocWithRetry(
       });
       return true;
     } catch (e) {
+      const rawErr = e instanceof Error ? e.message : String(e);
+      await recordSyncFailureAndMaybeReset(rawErr);
       if (attempt === maxRetries) {
         handleFirestoreError(e, OperationType.WRITE, path, onError);
         return false;
@@ -1004,37 +1255,103 @@ async function syncDocWithRetry(
 }
 
 /**
- * Replays queued writes ONLY for the specified signed-in uid.
+ * Replays queued writes ONLY for the specified signed-in uid, strictly one at a time.
  * Never replays or emits errors for a different account's queued writes.
+ * If both `users/{uid}` and `users/{uid}/meta/main` are queued, commits them in one atomic batch.
  */
-export async function flushPendingSyncQueue(
+export function flushPendingSyncQueue(
   uid: string,
   onError?: (msg: string) => void
 ): Promise<{ syncedCount: number; failedCount: number }> {
-  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) {
-    return { syncedCount: 0, failedCount: 0 };
-  }
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    return { syncedCount: 0, failedCount: 0 };
-  }
-
-  let syncedCount = 0;
-  let failedCount = 0;
-  try {
-    const tasks: SyncTask[] = await localGetAll<SyncTask>('syncQueue');
-    const matchingTasks = tasks.filter((t) => t.uid === uid);
-    for (const task of matchingTasks) {
-      const ok = await syncDocWithRetry(task, onError, 1);
-      if (ok) {
-        syncedCount++;
-      } else {
-        failedCount++;
-      }
+  const runPass = async (): Promise<{ syncedCount: number; failedCount: number }> => {
+    if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) {
+      return { syncedCount: 0, failedCount: 0 };
     }
-  } catch (e) {
-    console.warn('[UnStill CloudSync] Queue flush warning:', e);
-  }
-  return { syncedCount, failedCount };
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return { syncedCount: 0, failedCount: 0 };
+    }
+
+    let syncedCount = 0;
+    let failedCount = 0;
+    try {
+      const matchingTasks = await getQueuedWritesList(uid);
+      if (matchingTasks.length === 0) {
+        return { syncedCount: 0, failedCount: 0 };
+      }
+
+      // Restore any backup tasks into syncQueue store if needed
+      for (const task of matchingTasks) {
+        await localPut('syncQueue', task);
+      }
+
+      const rootTaskId = `${uid}:__root_user___${uid}`;
+      const metaTaskId = `${uid}:meta_main`;
+      const rootTask = matchingTasks.find((t) => t.id === rootTaskId);
+      const metaTask = matchingTasks.find((t) => t.id === metaTaskId);
+
+      const handledIds = new Set<string>();
+
+      // If both root user doc and meta/main are queued, commit them together in a writeBatch
+      if (rootTask && metaTask) {
+        handledIds.add(rootTaskId);
+        handledIds.add(metaTaskId);
+        const batchPath = `users/${uid} + users/${uid}/meta/main`;
+        try {
+          const batch = writeBatch(firestoreDb);
+          batch.set(doc(firestoreDb, 'users', uid), stripUndefined(rootTask.data), { merge: true });
+          batch.set(
+            doc(firestoreDb, 'users', uid, 'meta', 'main'),
+            stripUndefined(metaTask.data),
+            { merge: true }
+          );
+          await withTimeout(
+            batch.commit(),
+            firestoreWriteTimeoutMs,
+            `Firestore batch write (${batchPath}) timed out`
+          );
+          await removeSyncTask(rootTaskId, uid);
+          await removeSyncTask(metaTaskId, uid);
+          recordSyncSuccess();
+          recordWriteResult({
+            status: 'success',
+            operation: 'write',
+            path: batchPath,
+            timestamp: Date.now(),
+            error: null,
+          });
+          syncedCount += 2;
+        } catch (e) {
+          const rawErr = e instanceof Error ? e.message : String(e);
+          await recordSyncFailureAndMaybeReset(rawErr);
+          handleFirestoreError(e, OperationType.WRITE, batchPath, onError);
+          failedCount += 2;
+        }
+      }
+
+      const remaining = matchingTasks
+        .filter((t) => !handledIds.has(t.id))
+        .sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
+
+      for (const task of remaining) {
+        const ok = await syncDocWithRetry(task, onError, 0);
+        if (ok) {
+          syncedCount++;
+        } else {
+          failedCount++;
+        }
+      }
+    } catch (e) {
+      console.warn('[UnStill CloudSync] Queue flush warning:', e);
+    }
+    return { syncedCount, failedCount };
+  };
+
+  const next = activeQueueFlushChain.then(runPass, runPass);
+  activeQueueFlushChain = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
 }
 
 export async function scheduleBackgroundSync(
@@ -1056,38 +1373,22 @@ export async function scheduleBackgroundSync(
 
   await enqueueSyncTask(task);
 
-  Promise.resolve()
-    .then(() => {
-      // Never show "Saved on this device" for a different account
-      if (!auth.currentUser || auth.currentUser.uid !== uid) {
-        return false;
-      }
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        recordReadWriteError(
-          'write',
-          collectionName === '__root_user__'
-            ? `users/${uid}`
-            : `users/${uid}/${collectionName}/${docId}`,
-          'Device is offline; queued write for sync.'
-        );
-        if (onError) onError('Saved on this device, will sync later');
-        return false;
-      }
-      return syncDocWithRetry(task, onError);
-    })
-    .catch((e) => {
-      console.error('[UnStill CloudSync] Background sync error:', e);
-      recordReadWriteError(
-        'write',
-        collectionName === '__root_user__'
-          ? `users/${uid}`
-          : `users/${uid}/${collectionName}/${docId}`,
-        e instanceof Error ? e.message : String(e)
-      );
-      if (auth.currentUser?.uid === uid && onError) {
-        onError('Saved on this device, will sync later');
-      }
-    });
+  if (!auth.currentUser || auth.currentUser.uid !== uid) {
+    return;
+  }
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    recordReadWriteError(
+      'write',
+      collectionName === '__root_user__'
+        ? `users/${uid}`
+        : `users/${uid}/${collectionName}/${docId}`,
+      'Device is offline; queued write for sync.'
+    );
+    if (onError) onError('Saved on this device, will sync');
+    return;
+  }
+
+  void flushPendingSyncQueue(uid, onError);
 }
 
 // --- ONBOARDING ROUTING GUARD & PROGRESSIVE PERSISTENCE ---
@@ -1513,12 +1814,16 @@ export async function fetchCloudProfileDetailed(uid: string): Promise<CloudProfi
       };
     }
 
-    const [rootSnap, metaSnap, subSnap, subSchedSnap] = await Promise.all([
-      getDocFromServer(rootRef),
-      getDocFromServer(metaRef),
-      getDocFromServer(subRef).catch(() => null),
-      getDocFromServer(subSchedRef).catch(() => null),
-    ]);
+    const [rootSnap, metaSnap, subSnap, subSchedSnap] = await withTimeout(
+      Promise.all([
+        getDocFromServer(rootRef),
+        getDocFromServer(metaRef),
+        getDocFromServer(subRef).catch(() => null),
+        getDocFromServer(subSchedRef).catch(() => null),
+      ]),
+      firestoreWriteTimeoutMs,
+      'Cloud profile read timed out'
+    );
 
     const rootRaw = rootSnap.exists() ? rootSnap.data() : null;
     const metaRaw = metaSnap.exists() ? metaSnap.data() : null;
@@ -1592,36 +1897,17 @@ export async function fetchCloudProfileDetailed(uid: string): Promise<CloudProfi
         // ignore storage quota errors
       }
 
-      // If older account migration or subcollection completion was detected, persist onboardingComplete: true once to users/{uid}
+      // If older account migration or subcollection completion was detected, persist onboardingComplete: true once to users/{uid} in background
       if (
         (migratedLegacyCompletion || !isOnboardingComplete(rootRaw)) &&
         isOnboardingComplete(merged)
       ) {
-        try {
-          await setDoc(
-            rootRef,
-            stripUndefined({
-              ...merged,
-              onboardingComplete: true,
-              onboardingStep: 9,
-              updatedAt: Date.now(),
-            }),
-            { merge: true }
-          );
-          recordWriteResult({
-            status: 'success',
-            operation: 'write',
-            path: `users/${uid}`,
-            timestamp: Date.now(),
-            error: null,
-          });
-        } catch (writeErr) {
-          scheduleBackgroundSync(uid, '__root_user__', uid, {
-            ...merged,
-            onboardingComplete: true,
-            onboardingStep: 9,
-          });
-        }
+        void scheduleBackgroundSync(uid, '__root_user__', uid, {
+          ...merged,
+          onboardingComplete: true,
+          onboardingStep: 9,
+          updatedAt: Date.now(),
+        });
       }
 
       return {
@@ -1647,6 +1933,7 @@ export async function fetchCloudProfileDetailed(uid: string): Promise<CloudProfi
 /**
  * Creates the initial `users/{uid}` document for a new Google user (Flow B / D.c)
  * or a new Anonymous Guest user (Flow D.a).
+ * Local-first: saves locally and queues background Firestore sync without awaiting network.
  */
 export async function createInitialUserDoc(
   uid: string,
@@ -1718,44 +2005,17 @@ export async function createInitialUserDoc(
     // ignore
   }
 
-  const path = `users/${uid}`;
+  await enqueueSyncTask({
+    id: `${uid}:__root_user___${uid}`,
+    collectionName: '__root_user__',
+    docId: uid,
+    data: initialRaw,
+    uid,
+    updatedAt: now,
+  });
+
   if (auth.currentUser && auth.currentUser.uid === uid) {
-    try {
-      await setDoc(doc(firestoreDb, 'users', uid), initialRaw, { merge: true });
-      recordWriteResult({
-        status: 'success',
-        operation: 'write',
-        path,
-        timestamp: Date.now(),
-        error: null,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      recordWriteResult({
-        status: 'error',
-        operation: 'write',
-        path,
-        timestamp: Date.now(),
-        error: msg,
-      });
-      await enqueueSyncTask({
-        id: `${uid}:__root_user___${uid}`,
-        collectionName: '__root_user__',
-        docId: uid,
-        data: initialRaw,
-        uid,
-        updatedAt: now,
-      });
-    }
-  } else {
-    await enqueueSyncTask({
-      id: `${uid}:__root_user___${uid}`,
-      collectionName: '__root_user__',
-      docId: uid,
-      data: initialRaw,
-      uid,
-      updatedAt: now,
-    });
+    void flushPendingSyncQueue(uid);
   }
 
   return normalized;
@@ -1785,17 +2045,18 @@ export async function getProfile(
 }
 
 /**
- * Progressive onboarding step save (Requirement C.1):
- * - Writes step answers + onboardingStep (nextStep) + updatedAt to IndexedDB under `${uid}:profile`
- * - Awaits setDoc(doc(firestoreDb, 'users', uid), payload, { merge: true }) for both Google and anonymous auth users
- * - Records lastWriteResult & lastReadWriteError
- * - If Firestore write fails, keeps answers locally, queues retry in syncQueue under `uid`, and returns the REAL error text
+ * Local-first progressive onboarding step save (Requirement 1):
+ * - Writes step answers + onboardingStep (nextStep) + updatedAt to IndexedDB (or in-memory if IDB fails/times out) under `${uid}:profile`
+ * - Enqueues the Firestore merge write in the background syncQueue (`merge: true` with the same document id)
+ * - Does NOT await any Firestore network call
+ * - Immediately returns `{ ok: true, profile: normalized }`
  */
 export async function saveOnboardingStepProgress(
   uid: string,
   nextStep: number,
   stepAnswers: Record<string, any>,
-  isGuest: boolean = false
+  isGuest: boolean = false,
+  onError?: (msg: string) => void
 ): Promise<{ ok: boolean; profile: UserProfile; error?: string }> {
   const now = Date.now();
   const existingLocal = await getLocalProfile(uid);
@@ -1849,6 +2110,7 @@ export async function saveOnboardingStepProgress(
   }
 
   const firestorePayload = stripUndefined({
+    ...(existingLocal || {}),
     ...stepAnswers,
     uid,
     isGuest,
@@ -1859,80 +2121,29 @@ export async function saveOnboardingStepProgress(
     updatedAt: now,
   });
 
-  const path = `users/${uid}`;
   const syncTaskId = `${uid}:__root_user___${uid}`;
+  await enqueueSyncTask({
+    id: syncTaskId,
+    collectionName: '__root_user__',
+    docId: uid,
+    data: firestorePayload,
+    uid,
+    updatedAt: now,
+  });
 
-  // If no Firebase Auth session is active (e.g. pure local offline fallback in tests when auth is null)
-  if (!auth.currentUser || auth.currentUser.uid !== uid) {
-    if (isGuest && !auth.currentUser) {
-      recordWriteResult({
-        status: 'success',
-        operation: 'write',
-        path: `indexeddb:users/${uid}`,
-        timestamp: now,
-        error: null,
-      });
-      await enqueueSyncTask({
-        id: syncTaskId,
-        collectionName: '__root_user__',
-        docId: uid,
-        data: firestorePayload,
-        uid,
-        updatedAt: now,
-      });
-      return { ok: true, profile: normalized };
-    }
+  recordWriteResult({
+    status: 'success',
+    operation: 'write',
+    path: `indexeddb:users/${uid}`,
+    timestamp: now,
+    error: null,
+  });
 
-    const errMsg = 'Authentication session not found for current user. Queued for retry.';
-    await enqueueSyncTask({
-      id: syncTaskId,
-      collectionName: '__root_user__',
-      docId: uid,
-      data: firestorePayload,
-      uid,
-      updatedAt: now,
-    });
-    recordWriteResult({
-      status: 'error',
-      operation: 'write',
-      path,
-      timestamp: now,
-      error: errMsg,
-    });
-    return { ok: false, profile: normalized, error: errMsg };
+  if (auth.currentUser && auth.currentUser.uid === uid) {
+    void flushPendingSyncQueue(uid, onError);
   }
 
-  try {
-    await setDoc(doc(firestoreDb, 'users', uid), firestorePayload, { merge: true });
-    await removeSyncTask(syncTaskId, uid);
-    recordWriteResult({
-      status: 'success',
-      operation: 'write',
-      path,
-      timestamp: Date.now(),
-      error: null,
-    });
-    return { ok: true, profile: normalized };
-  } catch (e) {
-    const realError = e instanceof Error ? e.message : String(e);
-    console.error(`[UnStill Onboarding] Failed saving step to ${path}:`, e);
-    await enqueueSyncTask({
-      id: syncTaskId,
-      collectionName: '__root_user__',
-      docId: uid,
-      data: firestorePayload,
-      uid,
-      updatedAt: now,
-    });
-    recordWriteResult({
-      status: 'error',
-      operation: 'write',
-      path,
-      timestamp: Date.now(),
-      error: realError,
-    });
-    return { ok: false, profile: normalized, error: realError };
-  }
+  return { ok: true, profile: normalized };
 }
 
 export interface OnboardingMetaMain {
@@ -1962,12 +2173,10 @@ export interface OnboardingMetaMain {
 }
 
 /**
- * Final step atomic batch write (Requirement C.3):
- * Writes in one Firestore writeBatch:
- * 1) users/{uid} { onboardingComplete: true, onboardingCompletedAt, planVersion, ...all answers }
- * 2) users/{uid}/meta/main { planSummary, monthlyTheme, weeklyRhythm, planVersion, updatedAt }
- * Only if the batch succeeds does it return { ok: true }.
- * If it fails, keeps answers locally, queues retry, and returns the actual error text.
+ * Local-first final onboarding step save (Requirement 3):
+ * - Saves profile (with `onboardingComplete: true`), schedule, initialPlan, streaks, and painLog locally first
+ * - Queues the atomic batch write (`users/{uid}` and `users/{uid}/meta/main`) in `syncQueue` and triggers background sync without awaiting the network
+ * - Immediately returns `{ ok: true, profile: userDocPayload }` so "Your plan is ready" appears without waiting on the network
  */
 export async function completeOnboardingBatch(
   uid: string,
@@ -1977,7 +2186,8 @@ export async function completeOnboardingBatch(
   initialPlan: DailyPlan,
   nextStreaks: StreakData,
   initialPainLog: PainLog | null,
-  isGuest: boolean = false
+  isGuest: boolean = false,
+  onError?: (msg: string) => void
 ): Promise<{ ok: boolean; profile: UserProfile; error?: string }> {
   const now = Date.now();
   const completedAt = fullProfile.onboardingCompletedAt || now;
@@ -2003,7 +2213,18 @@ export async function completeOnboardingBatch(
     updatedAt: now,
   });
 
-  // Always save schedule, plan, streaks, and painLog to IndexedDB under uid-scoped keys first
+  // 1. Save profile, schedule, plan, streaks, painLog, and settings locally first
+  await localPut('profile', userDocPayload, uidKey(uid, 'profile'));
+  await localPut('profile', userDocPayload, uid);
+  saveOnboardingStepForUid(uid, 9);
+  try {
+    const serialized = JSON.stringify(userDocPayload);
+    localStorage.setItem(`${uid}:profile`, serialized);
+    localStorage.setItem(`hf_profile_${uid}`, serialized);
+  } catch {
+    // ignore storage quota errors
+  }
+
   await localPut('schedule', stripUndefined(fullSchedule), uidKey(uid, 'schedule'));
   await localPut('schedule', stripUndefined(fullSchedule), uid);
   await saveLocalPlanForUid(uid, initialPlan);
@@ -2024,165 +2245,83 @@ export async function completeOnboardingBatch(
     uidKey(uid, 'settings')
   );
 
-  const batchPath = `users/${uid} + users/${uid}/meta/main`;
+  // 2. Queue root user doc, meta/main, and subcollection mirrors in syncQueue
   const userSyncId = `${uid}:__root_user___${uid}`;
   const metaSyncId = `${uid}:meta_main`;
 
-  if (!auth.currentUser || auth.currentUser.uid !== uid) {
-    if (isGuest && !auth.currentUser) {
-      await localPut('profile', userDocPayload, uidKey(uid, 'profile'));
-      await localPut('profile', userDocPayload, uid);
-      try {
-        const serialized = JSON.stringify(userDocPayload);
-        localStorage.setItem(`${uid}:profile`, serialized);
-        localStorage.setItem(`hf_profile_${uid}`, serialized);
-      } catch {
-        // ignore
-      }
-      await enqueueSyncTask({
-        id: userSyncId,
-        collectionName: '__root_user__',
-        docId: uid,
-        data: userDocPayload,
-        uid,
-        updatedAt: now,
-      });
-      await enqueueSyncTask({
-        id: metaSyncId,
-        collectionName: 'meta',
-        docId: 'main',
-        data: metaDocPayload,
-        uid,
-        updatedAt: now,
-      });
-      recordWriteResult({
-        status: 'success',
-        operation: 'write',
-        path: `indexeddb:users/${uid}+meta/main`,
-        timestamp: now,
-        error: null,
-      });
-      return { ok: true, profile: userDocPayload };
-    }
-
-    const errMsg = 'Authentication session not active for this account.';
-    const uncompletedLocal: UserProfile = {
-      ...userDocPayload,
-      onboardingStep: 8,
-      onboardingComplete: false,
-    };
-    await localPut('profile', uncompletedLocal, uidKey(uid, 'profile'));
-    await localPut('profile', uncompletedLocal, uid);
+  await enqueueSyncTask({
+    id: userSyncId,
+    collectionName: '__root_user__',
+    docId: uid,
+    data: userDocPayload,
+    uid,
+    updatedAt: now,
+  });
+  await enqueueSyncTask({
+    id: metaSyncId,
+    collectionName: 'meta',
+    docId: 'main',
+    data: metaDocPayload,
+    uid,
+    updatedAt: now,
+  });
+  await enqueueSyncTask({
+    id: `${uid}:data_profile`,
+    collectionName: 'data',
+    docId: 'profile',
+    data: userDocPayload,
+    uid,
+    updatedAt: now,
+  });
+  await enqueueSyncTask({
+    id: `${uid}:data_schedule`,
+    collectionName: 'data',
+    docId: 'schedule',
+    data: stripUndefined(fullSchedule),
+    uid,
+    updatedAt: now,
+  });
+  await enqueueSyncTask({
+    id: `${uid}:plans_${initialPlan.date}`,
+    collectionName: 'plans',
+    docId: initialPlan.date,
+    data: stripUndefined(initialPlan),
+    uid,
+    updatedAt: now,
+  });
+  await enqueueSyncTask({
+    id: `${uid}:data_streaks`,
+    collectionName: 'data',
+    docId: 'streaks',
+    data: stripUndefined(nextStreaks),
+    uid,
+    updatedAt: now,
+  });
+  if (initialPainLog) {
     await enqueueSyncTask({
-      id: userSyncId,
-      collectionName: '__root_user__',
-      docId: uid,
-      data: userDocPayload,
+      id: `${uid}:painLogs_${initialPainLog.id}`,
+      collectionName: 'painLogs',
+      docId: initialPainLog.id,
+      data: stripUndefined(initialPainLog),
       uid,
       updatedAt: now,
     });
-    await enqueueSyncTask({
-      id: metaSyncId,
-      collectionName: 'meta',
-      docId: 'main',
-      data: metaDocPayload,
-      uid,
-      updatedAt: now,
-    });
-    recordWriteResult({
-      status: 'error',
-      operation: 'write',
-      path: batchPath,
-      timestamp: now,
-      error: errMsg,
-    });
-    return { ok: false, profile: uncompletedLocal, error: errMsg };
   }
 
-  try {
-    const batch = writeBatch(firestoreDb);
-    batch.set(doc(firestoreDb, 'users', uid), userDocPayload, { merge: true });
-    batch.set(doc(firestoreDb, 'users', uid, 'meta', 'main'), metaDocPayload, { merge: true });
-    await batch.commit();
+  recordWriteResult({
+    status: 'success',
+    operation: 'write',
+    path: `indexeddb:users/${uid}+meta/main`,
+    timestamp: now,
+    error: null,
+  });
 
-    // Batch succeeded: persist completed profile locally and clean up any queued onboarding tasks
-    await localPut('profile', userDocPayload, uidKey(uid, 'profile'));
-    await localPut('profile', userDocPayload, uid);
-    try {
-      const serialized = JSON.stringify(userDocPayload);
-      localStorage.setItem(`${uid}:profile`, serialized);
-      localStorage.setItem(`hf_profile_${uid}`, serialized);
-    } catch {
-      // ignore storage quota errors
-    }
-    await removeSyncTask(userSyncId, uid);
-    await removeSyncTask(metaSyncId, uid);
-
-    recordWriteResult({
-      status: 'success',
-      operation: 'write',
-      path: batchPath,
-      timestamp: Date.now(),
-      error: null,
-    });
-
-    // Also mirror subcollection docs in background without blocking
-    scheduleBackgroundSync(uid, 'data', 'profile', userDocPayload);
-    scheduleBackgroundSync(uid, 'data', 'schedule', fullSchedule);
-    scheduleBackgroundSync(uid, 'plans', initialPlan.date, initialPlan);
-    scheduleBackgroundSync(uid, 'data', 'streaks', nextStreaks);
-    if (initialPainLog) {
-      scheduleBackgroundSync(uid, 'painLogs', initialPainLog.id, initialPainLog);
-    }
-
-    return { ok: true, profile: userDocPayload };
-  } catch (e) {
-    const realError = e instanceof Error ? e.message : String(e);
-    console.error(`[UnStill Onboarding] Final batch write failed (${batchPath}):`, e);
-
-    // Keep all answers locally at step 8 without marking onboardingComplete true yet
-    const uncompletedLocal: UserProfile = {
-      ...userDocPayload,
-      onboardingStep: 8,
-      onboardingComplete: false,
-    };
-    await localPut('profile', uncompletedLocal, uidKey(uid, 'profile'));
-    await localPut('profile', uncompletedLocal, uid);
-    try {
-      const serialized = JSON.stringify(uncompletedLocal);
-      localStorage.setItem(`${uid}:profile`, serialized);
-      localStorage.setItem(`hf_profile_${uid}`, serialized);
-    } catch {
-      // ignore
-    }
-
-    await enqueueSyncTask({
-      id: userSyncId,
-      collectionName: '__root_user__',
-      docId: uid,
-      data: userDocPayload,
-      uid,
-      updatedAt: now,
-    });
-    await enqueueSyncTask({
-      id: metaSyncId,
-      collectionName: 'meta',
-      docId: 'main',
-      data: metaDocPayload,
-      uid,
-      updatedAt: now,
-    });
-
-    recordWriteResult({
-      status: 'error',
-      operation: 'write',
-      path: batchPath,
-      timestamp: Date.now(),
-      error: realError,
-    });
-
-    return { ok: false, profile: uncompletedLocal, error: realError };
+  // 3. Flush in background without blocking the UI
+  if (auth.currentUser && auth.currentUser.uid === uid) {
+    void flushPendingSyncQueue(uid, onError);
   }
+
+  return { ok: true, profile: userDocPayload };
 }
 
 export async function saveProfile(
@@ -2216,8 +2355,8 @@ export async function saveProfile(
     // ignore storage quota errors
   }
   // Write to both users/{uid} (root user doc) and users/{uid}/data/profile
-  scheduleBackgroundSync(uid, '__root_user__', uid, clean, onError);
-  scheduleBackgroundSync(uid, 'data', 'profile', clean, onError);
+  await scheduleBackgroundSync(uid, '__root_user__', uid, clean, onError);
+  await scheduleBackgroundSync(uid, 'data', 'profile', clean, onError);
 }
 
 // --- SCHEDULE ---

@@ -918,12 +918,38 @@ export const OnboardingScreen: React.FC = () => {
 
     const nextStep = step + 1;
     setIsSavingStep(true);
+    let advanced = false;
+
+    const maxDisableTimer = window.setTimeout(() => {
+      setIsSavingStep(false);
+      if (!advanced) {
+        advanced = true;
+        triggerSavedTick();
+        advanceToStep(nextStep);
+      }
+    }, 3000);
+
     try {
       const stepAnswers = buildStepAnswersPayload(step);
-      await saveOnboardingStep(nextStep, stepAnswers);
-      triggerSavedTick();
-      advanceToStep(nextStep);
+      await Promise.race([
+        saveOnboardingStep(nextStep, stepAnswers),
+        new Promise<{ ok: boolean }>((resolve) =>
+          window.setTimeout(() => resolve({ ok: true }), 2000)
+        ),
+      ]);
+      if (!advanced) {
+        advanced = true;
+        triggerSavedTick();
+        advanceToStep(nextStep);
+      }
+    } catch {
+      if (!advanced) {
+        advanced = true;
+        triggerSavedTick();
+        advanceToStep(nextStep);
+      }
     } finally {
+      window.clearTimeout(maxDisableTimer);
       setIsSavingStep(false);
     }
   };
@@ -932,50 +958,72 @@ export const OnboardingScreen: React.FC = () => {
     if (!consentChecked || isSavingFinalPlan) return;
     setIsSavingFinalPlan(true);
     setFinalSaveError(null);
-    try {
-      const res = await completeOnboarding(
-        {
-          name: name.trim() || 'Friend',
-          ageBand,
-          sex,
-          ...(profile?.heightUnit ? { heightUnit: profile.heightUnit } : {}),
-          timeZone,
-          habitType: habitType || 'All of the above',
-          sittingHoursPerDay: sittingHours ?? 7,
-          currentActiveDays: activeDays ?? 2,
-          level: level || 'Starter',
-          goal: goal || 'Ease stiffness',
-          conditions: noneSelected ? [] : conditions,
-          noneSelected,
-          painBaseline,
-          painDuration,
-          gettingWorse,
-          safetyFlags: redFlags,
-          pregnantOrPostpartum: Boolean(pregnantOrPostpartum),
-          doctorAdviceToAvoid: Boolean(doctorAdviceToAvoid),
-          recentSurgery: Boolean(recentSurgery),
-          cheerStyle: cheerStyle || 'Warm & celebratory',
-        },
-        {
-          workStart,
-          workEnd,
-          workType: workType || 'Desk / laptop',
-          remindersPerDay,
-          daysOff,
-          location: location || 'At desk',
-          equipment: equipment.length > 0 ? equipment : ['Chair / Desk'],
-          breakWindows: computeBreakWindows(remindersPerDay),
-        },
-        true
-      );
+    let advanced = false;
 
-      if (res.ok) {
+    const maxDisableTimer = window.setTimeout(() => {
+      setIsSavingFinalPlan(false);
+      if (!advanced) {
+        advanced = true;
         triggerSavedTick();
         advanceToStep(9);
-      } else {
-        setFinalSaveError(res.error || "Couldn't save your plan.");
+      }
+    }, 3000);
+
+    try {
+      await Promise.race([
+        completeOnboarding(
+          {
+            name: name.trim() || 'Friend',
+            ageBand,
+            sex,
+            ...(profile?.heightUnit ? { heightUnit: profile.heightUnit } : {}),
+            timeZone,
+            habitType: habitType || 'All of the above',
+            sittingHoursPerDay: sittingHours ?? 7,
+            currentActiveDays: activeDays ?? 2,
+            level: level || 'Starter',
+            goal: goal || 'Ease stiffness',
+            conditions: noneSelected ? [] : conditions,
+            noneSelected,
+            painBaseline,
+            painDuration,
+            gettingWorse,
+            safetyFlags: redFlags,
+            pregnantOrPostpartum: Boolean(pregnantOrPostpartum),
+            doctorAdviceToAvoid: Boolean(doctorAdviceToAvoid),
+            recentSurgery: Boolean(recentSurgery),
+            cheerStyle: cheerStyle || 'Warm & celebratory',
+          },
+          {
+            workStart,
+            workEnd,
+            workType: workType || 'Desk / laptop',
+            remindersPerDay,
+            daysOff,
+            location: location || 'At desk',
+            equipment: equipment.length > 0 ? equipment : ['Chair / Desk'],
+            breakWindows: computeBreakWindows(remindersPerDay),
+          },
+          true
+        ),
+        new Promise<{ ok: boolean }>((resolve) =>
+          window.setTimeout(() => resolve({ ok: true }), 2000)
+        ),
+      ]);
+
+      if (!advanced) {
+        advanced = true;
+        triggerSavedTick();
+        advanceToStep(9);
+      }
+    } catch {
+      if (!advanced) {
+        advanced = true;
+        triggerSavedTick();
+        advanceToStep(9);
       }
     } finally {
+      window.clearTimeout(maxDisableTimer);
       setIsSavingFinalPlan(false);
     }
   };

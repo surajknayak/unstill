@@ -70,6 +70,7 @@ import {
   saveOnboardingStepProgress,
   completeOnboardingBatch,
   recordWriteResult,
+  getQueuedWritesCount,
 } from '../lib/db';
 import {
   generateDailyPlan,
@@ -309,13 +310,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * Requirement A.5: "Saved on this device, will sync later" may show ONLY if a Firestore write
    * actually failed or the device is offline, and never for a different account.
    */
-  const handleCloudError = (msg: string) => {
+  const handleCloudError = (_msg: string) => {
     if (!userRef.current) return;
-    if (msg.startsWith('Saved on this device') || !navigator.onLine) {
-      showToast('Saved on this device, will sync later', 'info');
-    } else {
-      showToast('Saved on this device, will sync later', 'info');
-    }
+    showToast('Saved on this device, will sync', 'info');
   };
 
   /**
@@ -400,10 +397,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Online / Offline listeners: retry queued writes automatically on reconnect and show a quiet "Synced" when done
+  // Online / Offline listeners + 30s background retry with backoff for queued writes
   useEffect(() => {
+    let cancelled = false;
+    let backoffAttempt = 0;
+    let retryTimer: number | null = null;
+
+    const scheduleNextRetry = (delayMs: number) => {
+      if (cancelled) return;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
+      retryTimer = window.setTimeout(async () => {
+        if (cancelled) return;
+        const currentU = userRef.current;
+        if (currentU && auth.currentUser?.uid === currentU.uid && navigator.onLine) {
+          const queuedCount = await getQueuedWritesCount(currentU.uid);
+          if (queuedCount > 0) {
+            const { syncedCount, failedCount } = await flushPendingSyncQueue(
+              currentU.uid,
+              handleCloudError
+            );
+            if (syncedCount > 0 && failedCount === 0) {
+              backoffAttempt = 0;
+              showToast('Synced', 'success');
+            } else if (failedCount > 0) {
+              backoffAttempt = Math.min(backoffAttempt + 1, 4);
+            }
+          } else {
+            backoffAttempt = 0;
+          }
+        }
+        const nextDelay = Math.min(30000 * Math.pow(2, backoffAttempt), 300000);
+        scheduleNextRetry(nextDelay);
+      }, delayMs);
+    };
+
+    scheduleNextRetry(30000);
+
     const handleOnline = async () => {
       setIsOffline(false);
+      backoffAttempt = 0;
       const currentU = userRef.current;
       if (currentU && auth.currentUser?.uid === currentU.uid) {
         const { syncedCount, failedCount } = await flushPendingSyncQueue(
@@ -414,6 +448,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           showToast('Synced', 'success');
         }
       }
+      scheduleNextRetry(30000);
     };
     const handleOffline = () => {
       setIsOffline(true);
@@ -421,6 +456,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     return () => {
+      cancelled = true;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
@@ -574,14 +613,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     try {
       await ensureLocalDBHealthy();
-
-      // Replay queued writes ONLY for this signed-in uid (Requirement A.3 & A.5)
-      if (auth.currentUser && auth.currentUser.uid === uid && navigator.onLine) {
-        const flushRes = await flushPendingSyncQueue(uid, handleCloudError);
-        if (flushRes.syncedCount > 0 && flushRes.failedCount === 0) {
-          showToast('Synced', 'success');
-        }
-      }
 
       let localP: UserProfile | null = null;
       let localS: SchedulePrefs | null = null;
@@ -758,18 +789,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         } else {
           // Doc exists in Firestore but onboardingComplete is not true:
-          // Resume at users/{uid}.onboardingStep with all saved answers prefilled (name included)
+          // Merge with any newer local unsent progress and resume at onboardingStep
           const cloudS = await fetchCloudSchedule(uid);
-          const resumeStep = computeResumeOnboardingStep(cloudRes.profile);
+          const mergedPartialSource =
+            localP && (localP.updatedAt || 0) >= (cloudRes.profile.updatedAt || 0)
+              ? { ...cloudRes.profile, ...localP }
+              : { ...(localP || {}), ...cloudRes.profile };
+          const resumeStep = computeResumeOnboardingStep(mergedPartialSource);
           const firstNameFallback = !appUser.isGuest
             ? extractFirstNameFromDisplayName(appUser.displayName)
             : '';
           const partialProfile: UserProfile = {
-            ...cloudRes.profile,
+            ...mergedPartialSource,
             uid,
-            name: cloudRes.profile.name || firstNameFallback || '',
-            email: cloudRes.profile.email || appUser.email || undefined,
-            photoURL: cloudRes.profile.photoURL || appUser.photoURL || undefined,
+            name: mergedPartialSource.name || firstNameFallback || '',
+            email: mergedPartialSource.email || appUser.email || undefined,
+            photoURL: mergedPartialSource.photoURL || appUser.photoURL || undefined,
             provider: appUser.provider,
             isGuest: appUser.isGuest,
             onboardingStep: resumeStep,
@@ -860,6 +895,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (activeUidRef.current === uid) {
         setLoading(false);
         setAuthRestored(true);
+        // Requirement 5: On sign-in, flush the queue in the background AFTER the app is shown, never before routing.
+        if (auth.currentUser && auth.currentUser.uid === uid && navigator.onLine) {
+          void flushPendingSyncQueue(uid, handleCloudError).then((flushRes) => {
+            if (
+              activeUidRef.current === uid &&
+              flushRes.syncedCount > 0 &&
+              flushRes.failedCount === 0
+            ) {
+              showToast('Synced', 'success');
+            }
+          });
+        }
       }
     }
   };
@@ -1300,7 +1347,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isGuest: activeU.isGuest,
         onboardingComplete: preserveCompleted,
       },
-      activeU.isGuest
+      activeU.isGuest,
+      handleCloudError
     );
 
     profileRef.current = res.profile;
@@ -1315,11 +1363,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setSchedule(updatedSched);
     }
 
-    if (!res.ok && res.error) {
-      showToast(res.error, 'error');
-    }
-
-    return { ok: res.ok, error: res.error };
+    return { ok: true };
   };
 
   const finishOnboardingSummary = () => {
@@ -1455,7 +1499,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       initialPlan,
       nextStreaks,
       initialPainLog,
-      activeU.isGuest
+      activeU.isGuest,
+      handleCloudError
     );
 
     scheduleRef.current = fullSchedule;
@@ -1467,14 +1512,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (initialPainLog) {
       painLogsRef.current = [initialPainLog];
       setPainLogs([initialPainLog]);
-    }
-
-    if (!batchRes.ok) {
-      profileRef.current = batchRes.profile;
-      setProfile(batchRes.profile);
-      const errText = batchRes.error || "Couldn't save.";
-      showToast(errText, 'error');
-      return { ok: false, error: errText };
     }
 
     if (stayOnSummaryScreen) {
@@ -1490,7 +1527,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setProfileLoadError(null);
     if (!stayOnSummaryScreen) {
       clearOnboardingDraftForUid(activeU.uid);
-      showToast(isOffline ? 'Saved on this device, will sync later' : 'Synced', 'success');
+      showToast(isOffline ? 'Saved on this device, will sync' : 'Synced', 'success');
+    } else if (isOffline) {
+      showToast('Saved on this device, will sync', 'info');
     }
     return { ok: true };
   };
