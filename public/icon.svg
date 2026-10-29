@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="unstill-bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#27C8E8"/>
+      <stop offset="100%" stop-color="#2EB8F5"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="124" fill="url(#unstill-bg)"/>
+  <!-- Outer open white ring (gap at top-right ~45deg) -->
+  <circle
+    cx="256"
+    cy="256"
+    r="148"
+    stroke="#FFFFFF"
+    stroke-width="36"
+    stroke-linecap="round"
+    stroke-dasharray="730 930"
+    transform="rotate(20 256 256)"
+  />
+  <!-- Inner open white ring rotated so gaps do not align -->
+  <circle
+    cx="256"
+    cy="256"
+    r="86"
+    stroke="#FFFFFF"
+    stroke-width="34"
+    stroke-linecap="round"
+    stroke-dasharray="410 540"
+    transform="rotate(200 256 256)"
+  />
+  <!-- Small mint dot sitting in the gap of the outer ring -->
+  <circle cx="364" cy="154" r="22" fill="#5EE6B0"/>
+</svg>

@@ -1,0 +1,737 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// Hoisted mock state for simulating old-schema IndexedDB, NotFoundError, and Firestore
+const mocks = vi.hoisted(() => {
+  return {
+    openDBCalls: [] as Array<{ name: string; version: number; callbacks: any }>,
+    deleteDBCalls: [] as string[],
+    simulateMode: 'healthy' as 'healthy' | 'old_schema_not_found' | 'idb_unavailable',
+    closedConnections: 0,
+    guestExistingData: {} as Record<string, any[]>,
+    firestoreProfileDoc: null as Record<string, any> | null,
+    currentStores: new Set<string>(),
+    storeData: new Map<string, Map<string, any>>(),
+    currentUser: {
+      uid: 'user_returning_123',
+      email: 'returning@example.com',
+      emailVerified: true,
+      isAnonymous: false,
+    } as any,
+    setDocCalls: [] as Array<{ path: string; data: any; options: any }>,
+    batchSetCalls: [] as Array<{ path: string; data: any; options: any }>,
+    batchCommitCalls: 0,
+    setDocError: null as Error | null,
+    batchCommitError: null as Error | null,
+  };
+});
+
+vi.mock('idb', () => {
+  const createMockDB = (storeSet: Set<string>, dataMap: Map<string, Map<string, any>>) => {
+    const getStoreMap = (name: string) => {
+      if (!dataMap.has(name)) dataMap.set(name, new Map());
+      return dataMap.get(name)!;
+    };
+
+    const db: any = {
+      objectStoreNames: {
+        contains: (name: string) => storeSet.has(name),
+        [Symbol.iterator]: function* () {
+          yield* storeSet.values();
+        },
+      },
+      createObjectStore: vi.fn((name: string) => {
+        storeSet.add(name);
+        getStoreMap(name);
+        const indexSet = new Set<string>();
+        return {
+          indexNames: {
+            contains: (idx: string) => indexSet.has(idx),
+          },
+          createIndex: vi.fn((idx: string) => {
+            indexSet.add(idx);
+          }),
+        };
+      }),
+      close: vi.fn(() => {
+        mocks.closedConnections += 1;
+      }),
+      get: vi.fn(async (storeName: string, key: string) => {
+        if (!storeSet.has(storeName)) {
+          const err = new Error(
+            "Failed to execute 'transaction' on 'IDBDatabase': One of the specified object stores was not found."
+          );
+          err.name = 'NotFoundError';
+          throw err;
+        }
+        return getStoreMap(storeName).get(key);
+      }),
+      put: vi.fn(async (storeName: string, value: any, explicitKey?: string) => {
+        if (!storeSet.has(storeName)) {
+          const err = new Error(
+            "Failed to execute 'transaction' on 'IDBDatabase': One of the specified object stores was not found."
+          );
+          err.name = 'NotFoundError';
+          throw err;
+        }
+        const key = explicitKey || value?.id || value?.date || '__default__';
+        getStoreMap(storeName).set(key, value);
+      }),
+      getAll: vi.fn(async (storeName: string) => {
+        if (!storeSet.has(storeName)) {
+          const err = new Error(
+            "Failed to execute 'transaction' on 'IDBDatabase': One of the specified object stores was not found."
+          );
+          err.name = 'NotFoundError';
+          throw err;
+        }
+        return Array.from(getStoreMap(storeName).values());
+      }),
+      delete: vi.fn(async (storeName: string, key: string) => {
+        if (!storeSet.has(storeName)) {
+          const err = new Error(
+            "Failed to execute 'transaction' on 'IDBDatabase': One of the specified object stores was not found."
+          );
+          err.name = 'NotFoundError';
+          throw err;
+        }
+        getStoreMap(storeName).delete(key);
+      }),
+      clear: vi.fn(async (storeName: string) => {
+        if (!storeSet.has(storeName)) {
+          const err = new Error(
+            "Failed to execute 'transaction' on 'IDBDatabase': One of the specified object stores was not found."
+          );
+          err.name = 'NotFoundError';
+          throw err;
+        }
+        getStoreMap(storeName).clear();
+      }),
+      onversionchange: null,
+    };
+    return db;
+  };
+
+  return {
+    openDB: vi.fn(async (name: string, version: number, callbacks?: any) => {
+      mocks.openDBCalls.push({ name, version, callbacks });
+
+      if (mocks.simulateMode === 'idb_unavailable') {
+        const err = new Error('IndexedDB is disabled in private mode');
+        err.name = 'SecurityError';
+        throw err;
+      }
+
+      if (mocks.simulateMode === 'old_schema_not_found') {
+        // Simulate a corrupted or old-build DB that is missing required stores on first open
+        const partialStores = new Set<string>(['plans']);
+        const partialData = new Map<string, Map<string, any>>();
+        for (const [k, items] of Object.entries(mocks.guestExistingData)) {
+          partialStores.add(k);
+          const m = new Map<string, any>();
+          items.forEach((item, idx) => m.set(String(idx), item));
+          partialData.set(k, m);
+        }
+        const brokenDb = createMockDB(partialStores, partialData);
+        // After deleteDB is called during repair, subsequent openDB will run upgrade cleanly
+        mocks.simulateMode = 'healthy';
+        return brokenDb;
+      }
+
+      const db = createMockDB(mocks.currentStores, mocks.storeData);
+      if (callbacks?.upgrade) {
+        callbacks.upgrade(db, 0, version, {
+          objectStore: (storeName: string) => ({
+            indexNames: { contains: () => false },
+            createIndex: vi.fn(),
+            name: storeName,
+          }),
+        });
+      }
+      return db;
+    }),
+    deleteDB: vi.fn(async (name: string) => {
+      mocks.deleteDBCalls.push(name);
+      mocks.currentStores.clear();
+      mocks.storeData.clear();
+    }),
+  };
+});
+
+vi.mock('./firebase', () => ({
+  db: { __mockFirestore: true },
+  auth: {
+    get currentUser() {
+      return mocks.currentUser;
+    },
+  },
+}));
+
+vi.mock('firebase/firestore', () => ({
+  doc: vi.fn((_db: any, ...segments: string[]) => ({ path: segments.join('/') })),
+  collection: vi.fn((_db: any, ...segments: string[]) => ({ path: segments.join('/') })),
+  getDoc: vi.fn(async () => ({
+    exists: () => Boolean(mocks.firestoreProfileDoc),
+    data: () => mocks.firestoreProfileDoc,
+  })),
+  getDocFromServer: vi.fn(async (ref: { path: string }) => {
+    if (ref.path === `users/${mocks.currentUser?.uid}` && mocks.firestoreProfileDoc) {
+      return {
+        exists: () => true,
+        data: () => mocks.firestoreProfileDoc,
+      };
+    }
+    return {
+      exists: () => false,
+      data: () => undefined,
+    };
+  }),
+  setDoc: vi.fn(async (ref: { path: string }, data: any, options: any) => {
+    if (mocks.setDocError) {
+      throw mocks.setDocError;
+    }
+    mocks.setDocCalls.push({ path: ref.path, data, options });
+  }),
+  writeBatch: vi.fn(() => {
+    const staged: Array<{ path: string; data: any; options: any }> = [];
+    return {
+      set: vi.fn((ref: { path: string }, data: any, options: any) => {
+        staged.push({ path: ref.path, data, options });
+      }),
+      commit: vi.fn(async () => {
+        if (mocks.batchCommitError) {
+          throw mocks.batchCommitError;
+        }
+        mocks.batchCommitCalls += 1;
+        mocks.batchSetCalls.push(...staged);
+      }),
+    };
+  }),
+  getDocs: vi.fn(async () => ({ docs: [] })),
+  deleteDoc: vi.fn(async () => {}),
+  addDoc: vi.fn(async () => {}),
+  serverTimestamp: vi.fn(() => Date.now()),
+}));
+
+import {
+  DB_NAME,
+  DB_VERSION,
+  OBJECT_STORE_NAMES,
+  upgradeDatabaseSchema,
+  getLocalProfile,
+  saveProfile,
+  fetchCloudProfileDetailed,
+  ensureLocalDBHealthy,
+  saveSessionLog,
+  resetLocalDBConnectionForTest,
+  isOnboardingComplete,
+  computeResumeOnboardingStep,
+  saveOnboardingStepProgress,
+  completeOnboardingBatch,
+  getLastWriteResult,
+  getQueuedWritesCount,
+  getAllQueuedWritesDebugSummary,
+  clearSessionCacheOnSignOut,
+  flushPendingSyncQueue,
+  createInitialUserDoc,
+  hasLegacyOnboardingCompletionEvidence,
+  saveOnboardingDraftForUid,
+  getOnboardingDraftForUid,
+} from './db';
+
+describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore profile recovery', () => {
+  beforeEach(() => {
+    resetLocalDBConnectionForTest();
+    mocks.openDBCalls = [];
+    mocks.deleteDBCalls = [];
+    mocks.simulateMode = 'healthy';
+    mocks.closedConnections = 0;
+    mocks.guestExistingData = {};
+    mocks.currentStores = new Set<string>();
+    mocks.storeData = new Map();
+    mocks.setDocCalls = [];
+    mocks.batchSetCalls = [];
+    mocks.batchCommitCalls = 0;
+    mocks.setDocError = null;
+    mocks.batchCommitError = null;
+    mocks.currentUser = {
+      uid: 'user_returning_123',
+      email: 'returning@example.com',
+      emailVerified: true,
+      isAnonymous: false,
+    };
+    mocks.firestoreProfileDoc = {
+      uid: 'user_returning_123',
+      name: 'Aarav',
+      level: 'Steady',
+      goal: 'Ease stiffness',
+      conditions: ['neck_cs'],
+      onboardingComplete: true,
+      updatedAt: 1700000000000,
+    };
+
+    // Provide minimal global indexedDB and localStorage for Node test environment
+    Object.defineProperty(globalThis, 'indexedDB', {
+      value: {},
+      configurable: true,
+      writable: true,
+    });
+    const lsMap = new Map<string, string>();
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: {
+        getItem: (k: string) => lsMap.get(k) ?? null,
+        setItem: (k: string, v: string) => lsMap.set(k, v),
+        removeItem: (k: string) => lsMap.delete(k),
+      },
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { onLine: true },
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  it('defines a single canonical list of all required stores and bumps DB_VERSION to 3', () => {
+    expect(DB_NAME).toBe('habit-flow-db');
+    expect(DB_VERSION).toBeGreaterThanOrEqual(3);
+    expect(OBJECT_STORE_NAMES).toEqual(
+      expect.arrayContaining([
+        'profile',
+        'schedule',
+        'plans',
+        'sessions',
+        'painLogs',
+        'streaks',
+        'workouts',
+        'logs',
+        'feedback',
+        'reportsQueue',
+        'syncQueue',
+        'settings',
+      ])
+    );
+  });
+
+  it('upgrades an old v1 database by creating only missing stores without deleting existing stores', () => {
+    // Pre-existing v1 database that only has 'profile' and 'plans'
+    const existingStores = new Set<string>(['profile', 'plans']);
+    const createdStores: string[] = [];
+    const deletedStores: string[] = [];
+
+    const mockUpgradeDb: any = {
+      objectStoreNames: {
+        contains: (name: string) => existingStores.has(name),
+      },
+      createObjectStore: (name: string) => {
+        existingStores.add(name);
+        createdStores.push(name);
+        return {
+          indexNames: { contains: () => false },
+          createIndex: vi.fn(),
+        };
+      },
+      deleteObjectStore: (name: string) => {
+        deletedStores.push(name);
+      },
+    };
+
+    upgradeDatabaseSchema(mockUpgradeDb, 1, DB_VERSION, null);
+
+    // Must never delete any existing store
+    expect(deletedStores).toHaveLength(0);
+    // Must not recreate 'profile' or 'plans'
+    expect(createdStores).not.toContain('profile');
+    expect(createdStores).not.toContain('plans');
+    // Every canonical store must now be present
+    for (const requiredStore of OBJECT_STORE_NAMES) {
+      expect(existingStores.has(requiredStore)).toBe(true);
+    }
+  });
+
+  it('repairs silently when an old-schema DB lacks stores (NotFoundError), loads Firestore profile, and enables direct Today routing', async () => {
+    // Simulate an old-schema DB missing 'profile' and 'syncQueue'
+    mocks.simulateMode = 'old_schema_not_found';
+
+    await ensureLocalDBHealthy();
+
+    // Verify old connection was closed, local cache DB was deleted & recreated at DB_VERSION
+    expect(mocks.closedConnections).toBeGreaterThanOrEqual(1);
+    expect(mocks.deleteDBCalls).toContain('habit-flow-db');
+    expect(OBJECT_STORE_NAMES.every((s) => mocks.currentStores.has(s))).toBe(true);
+
+    // Now load profile: local cache is empty after repair, so fetchCloudProfileDetailed loads from Firestore
+    const cachedBeforeCloud = await getLocalProfile('user_returning_123');
+    expect(cachedBeforeCloud).toBeNull();
+
+    const cloudRes = await fetchCloudProfileDetailed('user_returning_123');
+    expect(cloudRes.status).toBe('found');
+    expect(cloudRes.profile?.onboardingComplete).toBe(true);
+    expect(cloudRes.profile?.name).toBe('Aarav');
+
+    // And the repaired IndexedDB now caches the Firestore profile for instant subsequent starts
+    const cachedAfterCloud = await getLocalProfile('user_returning_123');
+    expect(cachedAfterCloud?.onboardingComplete).toBe(true);
+    expect(cachedAfterCloud?.level).toBe('Steady');
+  });
+
+  it('exports a local guest backup JSON before repairing if guest data exists in an old-schema DB', async () => {
+    mocks.currentUser = null; // Guest user
+    mocks.guestExistingData = {
+      plans: [{ date: '2026-10-28', completedCount: 2, activeMinutes: 5 }],
+    };
+    mocks.simulateMode = 'old_schema_not_found';
+
+    // Trigger an operation on a missing store ('profile') which triggers repair
+    const profile = await getLocalProfile('guest_123');
+    expect(profile).toBeNull();
+
+    const backupJson = globalThis.localStorage.getItem('hf_guest_backup_json');
+    expect(backupJson).toBeTruthy();
+    const parsed = JSON.parse(backupJson!);
+    expect(parsed.reason).toBe('local_db_schema_repair_backup');
+    expect(parsed.data.plans).toHaveLength(1);
+    expect(parsed.data.plans[0].completedCount).toBe(2);
+  });
+
+  it('falls back to in-memory state and Firestore without crashing when IndexedDB is unavailable', async () => {
+    mocks.simulateMode = 'idb_unavailable';
+    Object.defineProperty(globalThis, 'indexedDB', {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    });
+
+    // Force operation when IndexedDB is unavailable
+    await saveSessionLog('user_returning_123', {
+      id: 'sess_mem_1',
+      date: '2026-10-28',
+      timestamp: Date.now(),
+      title: 'Neck Reset',
+      category: 'reset',
+      durationSec: 120,
+      feedback: 'good',
+    });
+
+    const cloudRes = await fetchCloudProfileDetailed('user_returning_123');
+    expect(cloudRes.status).toBe('found');
+    expect(cloudRes.profile?.onboardingComplete).toBe(true);
+  });
+
+  it('isOnboardingComplete returns true ONLY when userDoc.onboardingComplete === true', () => {
+    expect(isOnboardingComplete(null)).toBe(false);
+    expect(isOnboardingComplete(undefined)).toBe(false);
+    expect(isOnboardingComplete({ level: 'Steady', conditions: ['neck_cs'] })).toBe(false);
+    expect(isOnboardingComplete({ onboardingComplete: false, level: 'Steady' })).toBe(false);
+    expect(isOnboardingComplete({ onboardingComplete: true })).toBe(true);
+  });
+
+  it('preserves partial Step 1 data from users/{uid} and resumes at Step 2 instead of restarting at Step 1', async () => {
+    // Simulate a Google user whose Firestore users/{uid} only has step 1 data
+    mocks.firestoreProfileDoc = {
+      name: 'Suraj',
+      ageBand: '25–34',
+      sex: 'Male',
+      heightUnit: 'cm',
+    };
+
+    const cloudRes = await fetchCloudProfileDetailed('user_returning_123');
+    expect(cloudRes.status).toBe('found');
+    expect(isOnboardingComplete(cloudRes.profile)).toBe(false);
+    expect(cloudRes.profile?.name).toBe('Suraj');
+    expect(cloudRes.profile?.ageBand).toBe('25–34');
+    expect(cloudRes.profile?.sex).toBe('Male');
+    expect(cloudRes.profile?.heightUnit).toBe('cm');
+    expect(cloudRes.profile?.onboardingStep).toBe(2);
+    expect(computeResumeOnboardingStep(cloudRes.profile)).toBe(2);
+  });
+
+  it('saves onboarding steps progressively with merge:true and queues retry + returns real error on failure', async () => {
+    const step1Res = await saveOnboardingStepProgress('user_returning_123', 2, {
+      name: 'Suraj',
+      ageBand: '25–34',
+      sex: 'Male',
+      timeZone: 'Asia/Kolkata',
+    });
+
+    expect(step1Res.ok).toBe(true);
+    expect(mocks.setDocCalls).toHaveLength(1);
+    expect(mocks.setDocCalls[0].path).toBe('users/user_returning_123');
+    expect(mocks.setDocCalls[0].options).toEqual({ merge: true });
+    expect(mocks.setDocCalls[0].data.onboardingStep).toBe(2);
+    expect(getLastWriteResult().status).toBe('success');
+
+    // Simulate a Firestore error on Step 2 -> 3
+    mocks.setDocError = new Error('PERMISSION_DENIED: Missing or insufficient permissions.');
+    const step2Res = await saveOnboardingStepProgress('user_returning_123', 3, {
+      habitType: 'Move more',
+      sittingHoursPerDay: 8,
+      currentActiveDays: 2,
+    });
+
+    expect(step2Res.ok).toBe(false);
+    expect(step2Res.error).toContain('PERMISSION_DENIED');
+    expect(getLastWriteResult().status).toBe('error');
+    expect(getLastWriteResult().error).toContain('PERMISSION_DENIED');
+    expect(await getQueuedWritesCount('user_returning_123')).toBeGreaterThanOrEqual(1);
+
+    // Local profile still kept the answers and updated onboardingStep to 3
+    const localAfterError = await getLocalProfile('user_returning_123');
+    expect(localAfterError?.habitType).toBe('Move more');
+    expect(localAfterError?.sittingHoursPerDay).toBe(8);
+    expect(localAfterError?.onboardingStep).toBe(3);
+  });
+
+  it('writes users/{uid} and users/{uid}/meta/main in one atomic writeBatch on final onboarding step', async () => {
+    const now = Date.now();
+    const fullProfile: any = {
+      uid: 'user_returning_123',
+      name: 'Suraj',
+      ageBand: '25–34',
+      sex: 'Male',
+      timeZone: 'Asia/Kolkata',
+      habitType: 'All of the above',
+      sittingHoursPerDay: 7,
+      currentActiveDays: 3,
+      level: 'Steady',
+      goal: 'Ease stiffness',
+      conditions: ['neck_cs', 'lower_back'],
+      painBaseline: { neck_cs: 4, lower_back: 3 },
+      painDuration: { neck_cs: 'Few weeks', lower_back: 'Few days' },
+      gettingWorse: { neck_cs: false, lower_back: false },
+      safetyFlags: [],
+      pregnantOrPostpartum: false,
+      doctorAdviceToAvoid: false,
+      recentSurgery: false,
+      cheerStyle: 'Warm & celebratory',
+      theme: 'light',
+      reducedMotion: false,
+      soundHaptics: true,
+      planVersion: 1,
+      onboardingComplete: true,
+      onboardingCompletedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const fullSchedule: any = {
+      workStart: '09:30',
+      workEnd: '18:00',
+      workType: 'Desk / laptop',
+      breakWindows: ['10:30', '13:15', '15:30', '17:30'],
+      daysOff: [0, 6],
+      remindersPerDay: 4,
+      quietHours: { start: '21:30', end: '08:00' },
+      equipment: ['Chair / Desk'],
+      location: 'At desk',
+    };
+
+    const metaMain = {
+      planSummary: {
+        whyThisPlan: 'Tailored for neck & lower back comfort',
+        level: 'Steady',
+        goal: 'Ease stiffness',
+        focusAreas: ['Neck', 'Lower back'],
+        remindersPerDay: 4,
+        activeWindow: '09:30 – 18:00',
+        workType: 'Desk / laptop',
+        location: 'At desk',
+        equipment: ['Chair / Desk'],
+      },
+      monthlyTheme: 'Ease stiffness',
+      weeklyRhythm: {
+        workStart: '09:30',
+        workEnd: '18:00',
+        workType: 'Desk / laptop',
+        remindersPerDay: 4,
+        daysOff: [0, 6],
+        breakWindows: ['10:30', '13:15', '15:30', '17:30'],
+        level: 'Steady',
+      },
+      planVersion: 1,
+      updatedAt: now,
+    };
+
+    const initialPlan: any = {
+      date: '2026-10-28',
+      tasks: [],
+      completedCount: 0,
+      totalCount: 4,
+      activeMinutes: 0,
+      waterCups: 0,
+      waterGoal: 8,
+      steps: 0,
+      stepGoal: 6500,
+    };
+
+    const initialStreaks: any = {
+      currentStreak: 0,
+      bestStreak: 0,
+      freezeTokens: 2,
+      maxFreezes: 2,
+      lastActiveDate: '',
+      weeklyConsistency: {},
+      badges: ['First Step'],
+    };
+
+    // 1. Test failure handling: if batch fails, do not mark onboardingComplete true
+    mocks.batchCommitError = new Error('Firestore batch rejected by security rules');
+    const failedBatch = await completeOnboardingBatch(
+      'user_returning_123',
+      fullProfile,
+      fullSchedule,
+      metaMain,
+      initialPlan,
+      initialStreaks,
+      null,
+      false
+    );
+    expect(failedBatch.ok).toBe(false);
+    expect(failedBatch.error).toContain('Firestore batch rejected');
+    expect(failedBatch.profile.onboardingComplete).toBe(false);
+    expect(failedBatch.profile.onboardingStep).toBe(8);
+
+    // 2. Test success: batch commits both users/{uid} and users/{uid}/meta/main
+    mocks.batchCommitError = null;
+    const okBatch = await completeOnboardingBatch(
+      'user_returning_123',
+      fullProfile,
+      fullSchedule,
+      metaMain,
+      initialPlan,
+      initialStreaks,
+      null,
+      false
+    );
+    expect(okBatch.ok).toBe(true);
+    expect(okBatch.profile.onboardingComplete).toBe(true);
+    expect(mocks.batchCommitCalls).toBe(1);
+    expect(mocks.batchSetCalls.map((c) => c.path)).toEqual(
+      expect.arrayContaining(['users/user_returning_123', 'users/user_returning_123/meta/main'])
+    );
+
+    const userBatchWrite = mocks.batchSetCalls.find((c) => c.path === 'users/user_returning_123')!;
+    expect(userBatchWrite.data.onboardingComplete).toBe(true);
+    expect(userBatchWrite.data.conditions).toEqual(['neck_cs', 'lower_back']);
+    expect(userBatchWrite.data.workStart).toBe('09:30');
+    expect(userBatchWrite.data.equipment).toEqual(['Chair / Desk']);
+
+    const metaBatchWrite = mocks.batchSetCalls.find(
+      (c) => c.path === 'users/user_returning_123/meta/main'
+    )!;
+    expect(metaBatchWrite.data.monthlyTheme).toBe('Ease stiffness');
+    expect(metaBatchWrite.data.planSummary.level).toBe('Steady');
+    expect(metaBatchWrite.data.weeklyRhythm.remindersPerDay).toBe(4);
+  });
+
+  it('isolates local caches by uid, clears profile/draft on sign out while preserving queued writes, and only replays writes matching signed-in uid', async () => {
+    const uidA = 'uid_account_a';
+    const uidB = 'uid_account_b';
+
+    mocks.currentUser = { uid: uidA, isAnonymous: false };
+    await saveProfile(uidA, {
+      uid: uidA,
+      name: 'Account A',
+      level: 'Starter',
+      goal: 'Ease stiffness',
+      conditions: ['neck_cs'],
+      painBaseline: {},
+      safetyFlags: [],
+      cheerStyle: 'Warm & celebratory',
+      theme: 'light',
+      reducedMotion: false,
+      soundHaptics: true,
+      onboardingComplete: true,
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+    saveOnboardingDraftForUid(uidA, { name: 'Account A', ageBand: '25–34' });
+
+    // Account B has nothing saved yet — must not see Account A's profile or draft
+    expect(await getLocalProfile(uidB)).toBeNull();
+    expect(getOnboardingDraftForUid(uidB)).toBeNull();
+
+    // Queue a failed write for Account A and one for Account B
+    mocks.setDocError = new Error('Simulated offline failure');
+    await saveOnboardingStepProgress(uidA, 2, { name: 'Account A', ageBand: '25–34' });
+    mocks.currentUser = { uid: uidB, isAnonymous: false };
+    await saveOnboardingStepProgress(uidB, 2, { name: 'Account B', ageBand: '35–44' });
+    mocks.setDocError = null;
+
+    // Sign out of Account A: clears cached profile & draft of Account A, keeps queued write under uidA
+    await clearSessionCacheOnSignOut(uidA);
+    expect(await getLocalProfile(uidA)).toBeNull();
+    expect(getOnboardingDraftForUid(uidA)).toBeNull();
+    expect(await getQueuedWritesCount(uidA)).toBe(1);
+
+    // Sign in as Account B: flushPendingSyncQueue(uidB) must ONLY replay Account B's queued write
+    mocks.currentUser = { uid: uidB, isAnonymous: false };
+    mocks.setDocCalls = [];
+    const flushResB = await flushPendingSyncQueue(uidB);
+    expect(flushResB.syncedCount).toBe(1);
+    expect(await getQueuedWritesCount(uidB)).toBe(0);
+    // Account A's queued write remains untouched
+    expect(await getQueuedWritesCount(uidA)).toBe(1);
+    const summary = await getAllQueuedWritesDebugSummary();
+    expect(summary.totalCount).toBe(1);
+    expect(summary.uids).toEqual([uidA]);
+  });
+
+  it('creates new Google user doc with first name prefilled and starts at Step 1 with empty health answers', async () => {
+    const newGoogleUid = 'google_new_999';
+    mocks.currentUser = {
+      uid: newGoogleUid,
+      displayName: 'Suraj Kumar Nayak',
+      email: 'suraj@example.com',
+      photoURL: 'https://example.com/photo.jpg',
+      isAnonymous: false,
+    };
+    mocks.setDocCalls = [];
+
+    const createdProfile = await createInitialUserDoc(newGoogleUid, {
+      displayName: 'Suraj Kumar Nayak',
+      email: 'suraj@example.com',
+      photoURL: 'https://example.com/photo.jpg',
+      provider: 'google',
+      isGuest: false,
+    });
+
+    expect(createdProfile.name).toBe('Suraj');
+    expect(createdProfile.email).toBe('suraj@example.com');
+    expect(createdProfile.provider).toBe('google');
+    expect(createdProfile.isGuest).toBe(false);
+    expect(createdProfile.onboardingComplete).toBe(false);
+    expect(createdProfile.ageBand).toBe('');
+    // Because ageBand is empty, computeResumeOnboardingStep returns 1 (never skips Step 1)
+    expect(computeResumeOnboardingStep(createdProfile)).toBe(1);
+  });
+
+  it('migrates legacy completed accounts once when completion evidence is present', async () => {
+    const legacyUid = 'legacy_user_777';
+    mocks.currentUser = { uid: legacyUid, isAnonymous: false };
+    mocks.firestoreProfileDoc = {
+      uid: legacyUid,
+      name: 'Priya',
+      ageBand: '35–44',
+      conditions: ['neck_cs'],
+      workStart: '09:00',
+      workEnd: '17:30',
+      remindersPerDay: 4,
+      level: 'Steady',
+      goal: 'Ease stiffness',
+      // Note: onboardingComplete is missing on this legacy account
+    };
+
+    expect(
+      hasLegacyOnboardingCompletionEvidence(mocks.firestoreProfileDoc, {
+        monthlyTheme: 'Ease stiffness',
+      })
+    ).toBe(true);
+
+    const cloudRes = await fetchCloudProfileDetailed(legacyUid);
+    expect(cloudRes.status).toBe('found');
+    expect(cloudRes.profile?.onboardingComplete).toBe(true);
+    expect(isOnboardingComplete(cloudRes.profile)).toBe(true);
+  });
+});
+

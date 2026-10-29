@@ -1,0 +1,306 @@
+[
+  {
+    "id": "neck_cs",
+    "title": "Neck & Cervical Care",
+    "shortTitle": "Neck & Cervical",
+    "icon": "Sparkles",
+    "color": "sky",
+    "summary": "Gentle, upright neck glides and shoulder blade support to ease forward-head screen strain.",
+    "whatHelps": [
+      "Keep your head stacked over your shoulders with micro chin nods.",
+      "Support your forearms on armrests or the desk to take weight off your neck.",
+      "Raise your laptop or monitor so the top third of the screen is at eye level."
+    ],
+    "pacingRules": [
+      "Take a 60-second posture break every 30–45 minutes of screen work.",
+      "Keep stretches at a 2 or 3 out of 10 sensation — never pull on your head."
+    ],
+    "modifyOrSkip": [
+      "Skip full neck circles or rolling your head backward.",
+      "Avoid heavy overhead lifting or holding a phone between ear and shoulder.",
+      "Skip deep side-neck pulls with your hand."
+    ],
+    "deskTips": [
+      "Bring your screen closer instead of leaning your chin forward.",
+      "Check if you are clenching your jaw — let your tongue rest softly."
+    ],
+    "redFlags": [
+      "Numbness, tingling, or pins-and-needles radiating down your arm or fingers.",
+      "Sudden weakness in your grip or arm.",
+      "Dizziness, visual changes, or severe headache with neck movement."
+    ],
+    "recommendedMoveIds": ["chin_tuck", "shoulder_blade_squeeze", "shoulder_roll", "box_breathing"]
+  },
+  {
+    "id": "upper_back",
+    "title": "Upper Back & Rounded Shoulders",
+    "shortTitle": "Upper Back",
+    "icon": "Feather",
+    "color": "mint",
+    "summary": "Open tight chest muscles and gently wake up the mid-back muscles that support effortless posture.",
+    "whatHelps": [
+      "Frequent chest openers and slow shoulder rolls.",
+      "Gentle seated spinal waves to restore mid-back motion.",
+      "Deep rib-expanding breaths to release stiffness between shoulder blades."
+    ],
+    "pacingRules": [
+      "Alternate between sitting back against your chair support and sitting tall.",
+      "The best posture is your next posture — shift position often."
+    ],
+    "modifyOrSkip": [
+      "Avoid forcing your shoulders back rigidly for hours.",
+      "Skip jerky twisting motions."
+    ],
+    "deskTips": [
+      "Keep mouse and keyboard close so your elbows stay near your sides.",
+      "Rest your upper back against a supportive chair backrest."
+    ],
+    "redFlags": [
+      "Chest pain, pressure, or shortness of breath.",
+      "Sharp pain when taking a breath that does not ease with rest."
+    ],
+    "recommendedMoveIds": ["chest_opener", "shoulder_blade_squeeze", "seated_cat_cow", "wall_angel"]
+  },
+  {
+    "id": "lower_back",
+    "title": "Lower Back Comfort & Support",
+    "shortTitle": "Lower Back",
+    "icon": "ShieldCheck",
+    "color": "lavender",
+    "summary": "Decompress sitting load with hip hinges, gentle pelvic tilts, and short walking breaks.",
+    "whatHelps": [
+      "Stand up every 30–45 minutes for even 60 seconds to unload spinal discs.",
+      "Use a small rolled towel or cushion behind your lower back when seated.",
+      "Move from your hips with soft knees when bending."
+    ],
+    "pacingRules": [
+      "On high-stiffness days, choose shorter 1–2 minute standing or walking resets.",
+      "Keep all movements smooth and within a pain-free zone."
+    ],
+    "modifyOrSkip": [
+      "Skip unsupported toe-touches or deep rounded-back bending.",
+      "Avoid loaded spinal twists or sudden jerky movements."
+    ],
+    "deskTips": [
+      "Keep both feet flat on the floor (or a footrest) rather than crossing legs for hours.",
+      "Hips should be level with or slightly higher than your knees."
+    ],
+    "redFlags": [
+      "Shooting pain, numbness, or tingling down the back of your leg.",
+      "New weakness in your foot or leg.",
+      "Any changes in bladder or bowel control (seek urgent medical care)."
+    ],
+    "recommendedMoveIds": ["standing_hip_hinge", "seated_cat_cow", "seated_figure_four", "march_in_place"]
+  },
+  {
+    "id": "shoulder",
+    "title": "Shoulder Ease & Mobility",
+    "shortTitle": "Shoulders",
+    "icon": "Sun",
+    "color": "sun",
+    "summary": "Smooth, below-shoulder-height movement to nourish the joint without pinching.",
+    "whatHelps": [
+      "Pendulum-like easy arm swings and low shoulder rolls.",
+      "Setting your shoulder blades gently before reaching.",
+      "Supporting your arms on desk pads while typing."
+    ],
+    "pacingRules": [
+      "Keep reaches below 90 degrees (shoulder height) if overhead motion feels pinchy."
+    ],
+    "modifyOrSkip": [
+      "Skip deep dips, heavy push-ups, or forcing arms overhead against a wall."
+    ],
+    "deskTips": [
+      "Bring the mouse closer so you are not reaching forward all day."
+    ],
+    "redFlags": [
+      "Inability to lift your arm after a fall or sudden pop.",
+      "Pain radiating from chest/left shoulder with shortness of breath."
+    ],
+    "recommendedMoveIds": ["shoulder_roll", "shoulder_blade_squeeze", "chest_opener"]
+  },
+  {
+    "id": "wrist_hand",
+    "title": "Wrist, Hand & Typing Relief",
+    "shortTitle": "Wrists & Hands",
+    "icon": "Hand",
+    "color": "sky",
+    "summary": "Neutral-wrist habits and smooth tendon glides for heavy keyboard, laptop, and phone use.",
+    "whatHelps": [
+      "Keep wrists floating straight (neutral) rather than bent upward on the desk edge.",
+      "Do 30-second finger and tendon glides between long typing blocks.",
+      "Use a light touch on keys and mouse."
+    ],
+    "pacingRules": [
+      "Take micro-pauses where you let your hands rest completely open in your lap."
+    ],
+    "modifyOrSkip": [
+      "Skip planks, floor push-ups, or bearing body weight on bent wrists."
+    ],
+    "deskTips": [
+      "Flatten the back feet of your keyboard so it does not tilt upward into your wrists."
+    ],
+    "redFlags": [
+      "Persistent numbness or tingling in your thumb and first three fingers (especially at night).",
+      "Dropping objects or noticeable loss of thumb strength."
+    ],
+    "recommendedMoveIds": ["wrist_glides", "shoulder_roll", "box_breathing"]
+  },
+  {
+    "id": "knee",
+    "title": "Knee-Friendly Movement",
+    "shortTitle": "Knees",
+    "icon": "Heart",
+    "color": "mint",
+    "summary": "Gentle circulation and quad support with zero jumping, kneeling, or deep knee bends.",
+    "whatHelps": [
+      "Seated knee extensions to gently nourish the joint cartilage.",
+      "Using a higher chair and armrests when standing up.",
+      "Short, flat-surface walks at an easy pace."
+    ],
+    "pacingRules": [
+      "Use a comfortable, shallow range of motion on any standing leg exercise."
+    ],
+    "modifyOrSkip": [
+      "Skip deep squats, lunges, jumping, or kneeling on hard floors."
+    ],
+    "deskTips": [
+      "Avoid tucking your feet tightly under your chair for long periods; let knees rest at 90–100 degrees."
+    ],
+    "redFlags": [
+      "Sudden swelling, redness, or heat around the knee joint.",
+      "The knee locking, catching, or giving way when you put weight on it."
+    ],
+    "recommendedMoveIds": ["seated_knee_ext", "ankle_pumps", "standing_hip_hinge"]
+  },
+  {
+    "id": "hip_glute",
+    "title": "Hip & Glute Unlocker",
+    "shortTitle": "Hips & Glutes",
+    "icon": "Activity",
+    "color": "coral",
+    "summary": "Counteract tight hip flexors and sleepy glutes from hours in a chair.",
+    "whatHelps": [
+      "Standing up to open the front of your hips.",
+      "Seated figure-four stretch (or ankle cross) with a tall spine.",
+      "Short walking breaks to wake up glute circulation."
+    ],
+    "pacingRules": [
+      "Alternate sitting and standing if you have an adjustable surface, or stand during phone calls."
+    ],
+    "modifyOrSkip": [
+      "Avoid forcing your knee down in hip stretches."
+    ],
+    "deskTips": [
+      "Uncross your legs and sit evenly on both sit bones."
+    ],
+    "redFlags": [
+      "Sharp groin pain with weight-bearing or radiating leg numbness."
+    ],
+    "recommendedMoveIds": ["seated_figure_four", "standing_hip_hinge", "march_in_place"]
+  },
+  {
+    "id": "ankle_foot",
+    "title": "Ankle & Foot Circulation",
+    "shortTitle": "Ankles & Feet",
+    "icon": "Footprints",
+    "color": "sky",
+    "summary": "Pump fresh blood flow through your lower legs and keep ankles supple.",
+    "whatHelps": [
+      "Seated ankle pumps and alphabet circles under your desk.",
+      "Supporting your feet flat on the floor or a footrest.",
+      "Comfortable, supportive footwear during standing or walking."
+    ],
+    "pacingRules": [
+      "Prefer seated mobility on days when your feet or ankles feel tender."
+    ],
+    "modifyOrSkip": [
+      "Skip hopping, high-impact cardio, or unstable single-leg balances."
+    ],
+    "deskTips": [
+      "Do 10 slow ankle pumps every hour to prevent lower-leg heaviness."
+    ],
+    "redFlags": [
+      "One-sided calf swelling, warmth, or tenderness (seek prompt medical evaluation).",
+      "Inability to bear weight on your foot."
+    ],
+    "recommendedMoveIds": ["ankle_pumps", "seated_knee_ext", "box_breathing"]
+  },
+  {
+    "id": "eye_strain",
+    "title": "Screen Eyes & Headache Care",
+    "shortTitle": "Eye Strain",
+    "icon": "Eye",
+    "color": "lavender",
+    "summary": "20-20-20 visual resets, blinking reminders, and brow/neck relaxation.",
+    "whatHelps": [
+      "Every 20 minutes, look 20 feet away for 20 seconds.",
+      "Warm palm cupping over closed eyes to relax ocular muscles.",
+      "Softening jaw, temple, and neck tension."
+    ],
+    "pacingRules": [
+      "Pair every water sip with a 20-second look out the window."
+    ],
+    "modifyOrSkip": [
+      "Avoid bright screen glare or tiny font sizes that make you squint and lean forward."
+    ],
+    "deskTips": [
+      "Keep your screen an arm's length away and slightly below eye level."
+    ],
+    "redFlags": [
+      "Sudden vision changes, flashing lights, or severe headache."
+    ],
+    "recommendedMoveIds": ["eye_20_20_20", "chin_tuck", "box_breathing"]
+  },
+  {
+    "id": "stiff_sitting",
+    "title": "Long-Sitting Stiffness Relief",
+    "shortTitle": "Sitting Stiffness",
+    "icon": "Clock",
+    "color": "mint",
+    "summary": "Break up marathon desk blocks with 2-minute whole-body circulation resets.",
+    "whatHelps": [
+      "Standing up for 1–2 minutes every 45 minutes.",
+      "Combining a glass of water with a quick shoulder roll and hip stretch."
+    ],
+    "pacingRules": [
+      "Consistency beats intensity: four 2-minute resets beat one exhausting workout."
+    ],
+    "modifyOrSkip": [
+      "Never jump straight from 4 hours of sitting into fast, heavy movement without a 60-second warm-up."
+    ],
+    "deskTips": [
+      "Stand up whenever you take a phone call or wait for a file to load."
+    ],
+    "redFlags": [
+      "Sharp joint pain or dizziness when standing up quickly."
+    ],
+    "recommendedMoveIds": ["march_in_place", "seated_cat_cow", "chest_opener", "standing_hip_hinge"]
+  },
+  {
+    "id": "low_energy",
+    "title": "Calm Energy & Stress Reset",
+    "shortTitle": "Calm Energy",
+    "icon": "Sun",
+    "color": "sun",
+    "summary": "Gentle breath-led movement that wakes up circulation without draining your battery.",
+    "whatHelps": [
+      "Slow nasal breathing with a longer exhale (4s in, 6s out).",
+      "Opening the chest and unclenching the shoulders.",
+      "Stepping near natural daylight for 2 minutes."
+    ],
+    "pacingRules": [
+      "On tired days, 60 seconds of seated breathing + shoulder rolls counts as a full win."
+    ],
+    "modifyOrSkip": [
+      "Skip high-intensity workouts when you feel depleted or sleep-deprived."
+    ],
+    "deskTips": [
+      "Keep a water glass on your desk — mild dehydration often feels like afternoon fatigue."
+    ],
+    "redFlags": [
+      "Dizziness, chest tightness, or persistent exhaustion."
+    ],
+    "recommendedMoveIds": ["box_breathing", "chest_opener", "shoulder_roll", "eye_20_20_20"]
+  }
+]

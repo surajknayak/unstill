@@ -1,0 +1,186 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account basic metadata and progressive onboarding answers",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 120 },
+        "email": { "type": "string", "maxLength": 254 },
+        "photoURL": { "type": "string", "maxLength": 1024 },
+        "isGuest": { "type": "boolean" },
+        "ageBand": { "type": "string", "maxLength": 64 },
+        "sex": { "type": "string", "maxLength": 32 },
+        "heightUnit": { "type": "string", "maxLength": 16 },
+        "heightCm": { "type": "number" },
+        "weightKg": { "type": "number" },
+        "timeZone": { "type": "string", "maxLength": 100 },
+        "language": { "type": "string", "maxLength": 16 },
+        "onboardingStep": { "type": "number" },
+        "onboardingComplete": { "type": "boolean" },
+        "onboardingCompletedAt": { "type": "number" },
+        "planVersion": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "createdAt": { "type": "number" }
+      }
+    },
+    "Profile": {
+      "title": "Profile",
+      "description": "User movement profile, conditions, and safety flags",
+      "type": "object",
+      "properties": {
+        "conditions": { "type": "array" },
+        "painBaseline": { "type": "object" },
+        "painDuration": { "type": "object" },
+        "gettingWorse": { "type": "object" },
+        "safetyFlags": { "type": "array" },
+        "equipment": { "type": "array" },
+        "location": { "type": "string", "maxLength": 32 },
+        "goal": { "type": "string", "maxLength": 64 },
+        "cheerStyle": { "type": "string", "enum": ["gentle", "cheerleader", "data"], "maxLength": 32 },
+        "level": { "type": "string", "enum": ["Starter", "Steady", "Active"], "maxLength": 32 },
+        "activity": { "type": "object" },
+        "stepGoal": { "type": "number" },
+        "consent": { "type": "object" }
+      },
+      "required": ["conditions", "safetyFlags", "equipment", "location", "goal", "cheerStyle", "level", "consent"]
+    },
+    "Schedule": {
+      "title": "Schedule",
+      "description": "User workday schedule, break windows, and reminder settings",
+      "type": "object",
+      "properties": {
+        "workStart": { "type": "string", "maxLength": 16 },
+        "workEnd": { "type": "string", "maxLength": 16 },
+        "workType": { "type": "string", "maxLength": 32 },
+        "breakWindows": { "type": "array" },
+        "daysOff": { "type": "array" },
+        "weekdayMinutes": { "type": "number" },
+        "weekendMinutes": { "type": "number" },
+        "remindersPerDay": { "type": "number" },
+        "quietStart": { "type": "string", "maxLength": 16 },
+        "quietEnd": { "type": "string", "maxLength": 16 }
+      },
+      "required": ["workStart", "workEnd", "workType", "breakWindows", "daysOff", "weekdayMinutes", "weekendMinutes", "remindersPerDay", "quietStart", "quietEnd"]
+    },
+    "DailyPlan": {
+      "title": "DailyPlan",
+      "description": "Generated daily plan of workouts, resets, posture check, and quote",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string", "maxLength": 16, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "items": { "type": "array" },
+        "quoteId": { "type": "string", "maxLength": 32 },
+        "tinyWin": { "type": "string", "maxLength": 240 },
+        "whyToday": { "type": "string", "maxLength": 240 },
+        "postureDone": { "type": "boolean" },
+        "postureScore": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["items", "quoteId", "tinyWin", "whyToday", "postureDone", "createdAt"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Completed workout, reset, or manual activity log",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 16 },
+        "kind": { "type": "string", "maxLength": 32 },
+        "refId": { "type": "string", "maxLength": 64 },
+        "title": { "type": "string", "maxLength": 120 },
+        "durationSec": { "type": "number" },
+        "movesCount": { "type": "number" },
+        "feedback": { "type": "string", "maxLength": 32 },
+        "steps": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["date", "kind", "refId", "durationSec", "createdAt"]
+    },
+    "PainEntry": {
+      "title": "PainEntry",
+      "description": "Weekly or daily pain check-in score for a condition",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 16 },
+        "condition": { "type": "string", "maxLength": 64 },
+        "score": { "type": "number" },
+        "note": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["date", "condition", "score"]
+    },
+    "UserMeta": {
+      "title": "UserMeta",
+      "description": "User streak, badges, disabled moves, and seen quotes",
+      "type": "object",
+      "properties": {
+        "streak": { "type": "number" },
+        "bestStreak": { "type": "number" },
+        "freezes": { "type": "number" },
+        "lastActiveDate": { "type": "string", "maxLength": 16 },
+        "badges": { "type": "array" },
+        "disabledMoveIds": { "type": "array" },
+        "favouriteQuoteIds": { "type": "array" },
+        "seenQuoteIds": { "type": "array" },
+        "monthlyTheme": { "type": "string", "maxLength": 64 },
+        "postureChecksHigh": { "type": "number" }
+      },
+      "required": ["streak", "bestStreak", "freezes", "badges", "disabledMoveIds", "favouriteQuoteIds", "seenQuoteIds", "monthlyTheme"]
+    },
+    "ProblemReport": {
+      "title": "ProblemReport",
+      "description": "User submitted bug report, safety concern, or idea",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "category": { "type": "string", "enum": ["Bug", "Wrong plan or exercise", "Safety concern", "Idea"], "maxLength": 64 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "appVersion": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "category", "message", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Primary user document containing account details"
+    },
+    "/users/{uid}/profile/{docId}": {
+      "schema": { "$ref": "#/entities/Profile" },
+      "description": "User health profile and onboarding preferences"
+    },
+    "/users/{uid}/schedule/{docId}": {
+      "schema": { "$ref": "#/entities/Schedule" },
+      "description": "User workday and break schedule"
+    },
+    "/users/{uid}/plans/{date}": {
+      "schema": { "$ref": "#/entities/DailyPlan" },
+      "description": "Generated daily movement plan"
+    },
+    "/users/{uid}/logs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Completed workout, reset, and step logs"
+    },
+    "/users/{uid}/pain/{painId}": {
+      "schema": { "$ref": "#/entities/PainEntry" },
+      "description": "Pain check-in entries per condition"
+    },
+    "/users/{uid}/meta/{docId}": {
+      "schema": { "$ref": "#/entities/UserMeta" },
+      "description": "Streaks, badges, disabled moves, and quote history"
+    },
+    "/users/{uid}/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/ProblemReport" },
+      "description": "Legacy user-scoped problem reports"
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/ProblemReport" },
+      "description": "Top-level write-only problem reports and suggestions"
+    }
+  }
+}
+

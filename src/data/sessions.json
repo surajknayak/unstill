@@ -1,0 +1,79 @@
+[
+  {
+    "id": "sess_desk_2min",
+    "title": "2-Minute Desk Reset",
+    "subtitle": "Instant relief for neck, shoulders & wrists without leaving your chair.",
+    "durationMin": 2,
+    "category": "Desk Reset",
+    "level": "Starter",
+    "position": "Seated",
+    "moveIds": ["chin_tuck", "shoulder_roll", "wrist_glides"],
+    "safeFor": ["neck_cs", "upper_back", "wrist_hand", "knee", "ankle_foot"]
+  },
+  {
+    "id": "sess_neck_care",
+    "title": "Cervical & Upper Back Soother",
+    "subtitle": "No neck circles — just safe chin nods, blade glides & calm breath.",
+    "durationMin": 3,
+    "category": "Neck & Shoulder",
+    "level": "Starter",
+    "position": "Seated",
+    "moveIds": ["chin_tuck", "shoulder_blade_squeeze", "chest_opener", "box_breathing"],
+    "safeFor": ["neck_cs", "upper_back", "shoulder", "eye_strain"]
+  },
+  {
+    "id": "sess_back_hips",
+    "title": "Lower Back & Sitting Unwind",
+    "subtitle": "Gently wake up stiff hips and decompress your lower spine.",
+    "durationMin": 4,
+    "category": "Back Care",
+    "level": "Starter",
+    "position": "Mixed",
+    "moveIds": ["seated_cat_cow", "standing_hip_hinge", "seated_figure_four", "box_breathing"],
+    "safeFor": ["lower_back", "hip_glute", "stiff_sitting"]
+  },
+  {
+    "id": "sess_knee_ankle",
+    "title": "Knee & Ankle Circulation Flow",
+    "subtitle": "Chair-supported quad activation and smooth ankle mobility.",
+    "durationMin": 3,
+    "category": "Hip & Knee",
+    "level": "Starter",
+    "position": "Seated",
+    "moveIds": ["seated_knee_ext", "ankle_pumps", "seated_cat_cow"],
+    "safeFor": ["knee", "ankle_foot", "lower_back"]
+  },
+  {
+    "id": "sess_midday_boost",
+    "title": "Midday Energy & Posture Lift",
+    "subtitle": "Shake off the afternoon slump with light standing movement.",
+    "durationMin": 5,
+    "category": "Full Body",
+    "level": "Steady",
+    "position": "Standing",
+    "moveIds": ["march_in_place", "wall_angel", "standing_hip_hinge", "sit_to_stand", "chest_opener"],
+    "safeFor": ["upper_back", "stiff_sitting", "low_energy"]
+  },
+  {
+    "id": "sess_screen_eyes",
+    "title": "Screen Eyes & Brow Release",
+    "subtitle": "20-20-20 gaze reset, warm palming, and soft neck release.",
+    "durationMin": 2,
+    "category": "Desk Reset",
+    "level": "Starter",
+    "position": "Seated",
+    "moveIds": ["eye_20_20_20", "chin_tuck", "box_breathing"],
+    "safeFor": ["eye_strain", "neck_cs", "low_energy"]
+  },
+  {
+    "id": "sess_evening_calm",
+    "title": "Evening Decompress & Breath",
+    "subtitle": "Let go of workday tension before your evening rest.",
+    "durationMin": 4,
+    "category": "Evening Wind-down",
+    "level": "Starter",
+    "position": "Seated",
+    "moveIds": ["shoulder_roll", "seated_cat_cow", "eye_20_20_20", "box_breathing"],
+    "safeFor": ["neck_cs", "upper_back", "lower_back", "low_energy", "eye_strain"]
+  }
+]

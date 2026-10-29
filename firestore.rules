@@ -1,0 +1,224 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidUser(data) {
+      return data is map &&
+        data.keys().size() <= 100 &&
+        (!('uid' in data) || (data.uid is string && data.uid.size() <= 128)) &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 120)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 254)) &&
+        (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+        (!('provider' in data) || (data.provider is string && data.provider.size() <= 64)) &&
+        (!('isGuest' in data) || data.isGuest is bool) &&
+        (!('ageBand' in data) || (data.ageBand is string && data.ageBand.size() <= 64)) &&
+        (!('timeZone' in data) || (data.timeZone is string && data.timeZone.size() <= 100)) &&
+        (!('level' in data) || (data.level is string && data.level.size() <= 64)) &&
+        (!('goal' in data) || (data.goal is string && data.goal.size() <= 120)) &&
+        (!('onboardingStep' in data) || (data.onboardingStep is number && data.onboardingStep >= 1 && data.onboardingStep <= 20)) &&
+        (!('onboardingComplete' in data) || data.onboardingComplete is bool) &&
+        (!('onboardingCompletedAt' in data) || data.onboardingCompletedAt is number) &&
+        (!('planVersion' in data) || data.planVersion is number) &&
+        (!('createdAt' in data) || data.createdAt is number) &&
+        (!('updatedAt' in data) || data.updatedAt is number);
+    }
+
+    function isValidDataDoc(data) {
+      return data is map &&
+        data.keys().size() <= 100 &&
+        (!('uid' in data) || (data.uid is string && data.uid.size() <= 128)) &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 120)) &&
+        (!('onboardingComplete' in data) || data.onboardingComplete is bool) &&
+        (!('workStart' in data) || (data.workStart is string && data.workStart.size() <= 32)) &&
+        (!('currentStreak' in data) || (data.currentStreak is number && data.currentStreak >= 0));
+    }
+
+    function isValidProfile(data) {
+      return data is map &&
+        data.keys().size() <= 100 &&
+        (!('conditions' in data) || (data.conditions is list && data.conditions.size() <= 40)) &&
+        (!('safetyFlags' in data) || (data.safetyFlags is list && data.safetyFlags.size() <= 30)) &&
+        (!('goal' in data) || (data.goal is string && data.goal.size() <= 120)) &&
+        (!('cheerStyle' in data) || (data.cheerStyle is string && data.cheerStyle.size() <= 64)) &&
+        (!('level' in data) || (data.level is string && data.level.size() <= 64));
+    }
+
+    function isValidSchedule(data) {
+      return data is map &&
+        data.keys().size() <= 60 &&
+        (!('workStart' in data) || (data.workStart is string && data.workStart.size() <= 32)) &&
+        (!('workEnd' in data) || (data.workEnd is string && data.workEnd.size() <= 32)) &&
+        (!('breakWindows' in data) || (data.breakWindows is list && data.breakWindows.size() <= 20)) &&
+        (!('daysOff' in data) || (data.daysOff is list && data.daysOff.size() <= 7));
+    }
+
+    function isValidPlan(data) {
+      return data is map &&
+        data.keys().size() <= 60 &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 32)) &&
+        (!('tasks' in data) || (data.tasks is list && data.tasks.size() <= 60)) &&
+        (!('items' in data) || (data.items is list && data.items.size() <= 60));
+    }
+
+    function isValidLog(data) {
+      return data is map &&
+        data.keys().size() <= 40 &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 32)) &&
+        (!('durationSec' in data) || (data.durationSec is number && data.durationSec >= 0 && data.durationSec <= 86400));
+    }
+
+    function isValidPain(data) {
+      return data is map &&
+        data.keys().size() <= 40 &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 32));
+    }
+
+    function isValidWorkout(data) {
+      return data is map &&
+        data.keys().size() <= 50 &&
+        (!('title' in data) || (data.title is string && data.title.size() <= 120)) &&
+        (!('blocks' in data) || (data.blocks is list && data.blocks.size() <= 60));
+    }
+
+    function isValidMeta(data) {
+      return data is map &&
+        data.keys().size() <= 100 &&
+        (!('monthlyTheme' in data) || (data.monthlyTheme is string && data.monthlyTheme.size() <= 120)) &&
+        (!('planSummary' in data) || data.planSummary is map) &&
+        (!('weeklyRhythm' in data) || data.weeklyRhythm is map) &&
+        (!('planVersion' in data) || data.planVersion is number) &&
+        (!('updatedAt' in data) || data.updatedAt is number) &&
+        (!('streak' in data) || (data.streak is number && data.streak >= 0)) &&
+        (!('bestStreak' in data) || (data.bestStreak is number && data.bestStreak >= 0));
+    }
+
+    function isValidReport(data) {
+      return data.keys().hasAll(['message', 'createdAt']) &&
+        data.message is string && data.message.size() <= 1000 &&
+        data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    function isValidTopLevelReport(data) {
+      return data.keys().hasAll(['uid', 'category', 'message', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'category', 'message', 'appVersion', 'createdAt']) &&
+        data.uid == request.auth.uid &&
+        data.category is string &&
+        data.category in ['Bug', 'Wrong plan or exercise', 'Safety concern', 'Idea'] &&
+        data.message is string &&
+        data.message.size() >= 1 &&
+        data.message.size() <= 500 &&
+        (!('appVersion' in data) || (data.appVersion is string && data.appVersion.size() <= 120)) &&
+        (data.createdAt == request.time || (data.createdAt is string && data.createdAt.size() <= 64));
+    }
+
+    match /reports/{reportId} {
+      allow create: if isSignedIn() && isValidId(reportId) && isValidTopLevelReport(incoming());
+      allow read, update, delete: if false;
+    }
+
+    match /users/{uid} {
+      allow get: if isOwner(uid) && isValidId(uid);
+      allow list: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isValidId(uid) && isValidUser(incoming());
+      allow delete: if isOwner(uid) && isValidId(uid);
+
+      match /data/{docId} {
+        allow get: if isOwner(uid) && isValidId(docId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(docId) && isValidDataDoc(incoming());
+        allow delete: if isOwner(uid) && isValidId(docId);
+      }
+
+      match /profile/{docId} {
+        allow get: if isOwner(uid) && isValidId(docId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(docId) && isValidProfile(incoming());
+        allow delete: if isOwner(uid) && isValidId(docId);
+      }
+
+      match /schedule/{docId} {
+        allow get: if isOwner(uid) && isValidId(docId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(docId) && isValidSchedule(incoming());
+        allow delete: if isOwner(uid) && isValidId(docId);
+      }
+
+      match /plans/{date} {
+        allow get: if isOwner(uid) && isValidId(date);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(date) && isValidPlan(incoming());
+        allow delete: if isOwner(uid) && isValidId(date);
+      }
+
+      match /sessions/{sessionId} {
+        allow get: if isOwner(uid) && isValidId(sessionId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(sessionId) && isValidLog(incoming());
+        allow delete: if isOwner(uid) && isValidId(sessionId);
+      }
+
+      match /painLogs/{painId} {
+        allow get: if isOwner(uid) && isValidId(painId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(painId) && isValidPain(incoming());
+        allow delete: if isOwner(uid) && isValidId(painId);
+      }
+
+      match /workouts/{workoutId} {
+        allow get: if isOwner(uid) && isValidId(workoutId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(workoutId) && isValidWorkout(incoming());
+        allow delete: if isOwner(uid) && isValidId(workoutId);
+      }
+
+      match /logs/{logId} {
+        allow get: if isOwner(uid) && isValidId(logId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(logId) && isValidLog(incoming());
+        allow delete: if isOwner(uid) && isValidId(logId);
+      }
+
+      match /pain/{painId} {
+        allow get: if isOwner(uid) && isValidId(painId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(painId) && isValidPain(incoming());
+        allow delete: if isOwner(uid) && isValidId(painId);
+      }
+
+      match /meta/{docId} {
+        allow get: if isOwner(uid) && isValidId(docId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(docId) && isValidMeta(incoming());
+        allow delete: if isOwner(uid) && isValidId(docId);
+      }
+
+      match /reports/{reportId} {
+        allow get: if isOwner(uid) && isValidId(reportId);
+        allow list: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(reportId) && isValidReport(incoming());
+        allow delete: if isOwner(uid) && isValidId(reportId);
+      }
+    }
+  }
+}
+
