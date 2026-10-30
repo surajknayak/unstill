@@ -248,8 +248,13 @@ function closeActiveDBConnection() {
   dbPromise = null;
 }
 
-export const IDB_TIMEOUT_MS = 2000;
+export const IDB_TIMEOUT_MS = 1200;
+let idbTimeoutMs = IDB_TIMEOUT_MS;
 let firestoreWriteTimeoutMs = 8000;
+
+export function setIdbTimeoutForTest(ms: number) {
+  idbTimeoutMs = ms;
+}
 
 export function setFirestoreWriteTimeoutForTest(ms: number) {
   firestoreWriteTimeoutMs = ms;
@@ -295,6 +300,7 @@ export function resetLocalDBConnectionForTest() {
   lastSyncErrorState = null;
   consecutiveSyncFailures = 0;
   activeQueueFlushChain = Promise.resolve();
+  idbTimeoutMs = IDB_TIMEOUT_MS;
   firestoreWriteTimeoutMs = 8000;
   try {
     if (typeof localStorage !== 'undefined') {
@@ -478,14 +484,14 @@ export async function ensureLocalDBHealthy(): Promise<void> {
   try {
     const db = await withTimeout(
       getLocalDB(),
-      IDB_TIMEOUT_MS,
+      idbTimeoutMs,
       'IndexedDB open timed out after 2s'
     );
     const missingStore = OBJECT_STORE_NAMES.some((name) => !db.objectStoreNames.contains(name));
     if (missingStore) {
       await withTimeout(
         repairLocalCacheDB(),
-        IDB_TIMEOUT_MS,
+        idbTimeoutMs,
         'IndexedDB repair timed out after 2s'
       );
     }
@@ -494,7 +500,7 @@ export async function ensureLocalDBHealthy(): Promise<void> {
       try {
         await withTimeout(
           repairLocalCacheDB(),
-          IDB_TIMEOUT_MS,
+          idbTimeoutMs,
           'IndexedDB repair timed out after 2s'
         );
       } catch {
@@ -507,11 +513,11 @@ export async function ensureLocalDBHealthy(): Promise<void> {
 }
 
 /**
- * Central transaction helper: wraps every IndexedDB operation with a 2-second timeout.
+ * Central transaction helper: wraps every IndexedDB operation with a hard timeout (`idbTimeoutMs`).
  * - Verifies target objectStore exists; if missing or NotFoundError/corrupted is thrown,
  *   closes the DB, deletes only the local cache DB, recreates it with the current schema,
  *   and retries once.
- * - If IndexedDB is unavailable (private mode, blocked) or takes longer than 2s,
+ * - If IndexedDB is unavailable (private mode, blocked) or times out,
  *   seamlessly falls back to in-memory storage.
  */
 async function runWithStore<T>(
@@ -536,7 +542,7 @@ async function runWithStore<T>(
         }
         return await idbOp(db);
       })(),
-      IDB_TIMEOUT_MS,
+      idbTimeoutMs,
       `IndexedDB operation on "${storeName}" timed out after 2s`
     );
   } catch (err) {
@@ -545,13 +551,13 @@ async function runWithStore<T>(
       try {
         const repaired = await withTimeout(
           repairLocalCacheDB(),
-          IDB_TIMEOUT_MS,
+          idbTimeoutMs,
           'IndexedDB repair timed out after 2s'
         );
         if (repaired && !isUsingMemoryFallback) {
           return await withTimeout(
             idbOp(repaired),
-            IDB_TIMEOUT_MS,
+            idbTimeoutMs,
             `IndexedDB retry on "${storeName}" timed out after 2s`
           );
         }
@@ -1100,9 +1106,14 @@ export async function getQueuedWritesCount(uid?: string): Promise<number> {
  * (`${uid}:${collectionName}_${docId}`) already exists in `syncQueue`, and persists
  * across reloads in both IndexedDB and localStorage backup.
  */
-async function enqueueSyncTask(task: SyncTask) {
+function enqueueSyncTaskSync(task: SyncTask): SyncTask {
   const normalizedId = task.id.startsWith(`${task.uid}:`) ? task.id : `${task.uid}:${task.id}`;
-  const existing = await localGet<SyncTask>('syncQueue', normalizedId);
+  const memQueue = getMemoryStore('syncQueue');
+  const existingMem = memQueue.get(normalizedId) as SyncTask | undefined;
+  const backupTasks = readBackupSyncQueueForUid(task.uid);
+  const existingBackup = backupTasks.find((t) => t.id === normalizedId);
+  const existing = existingMem || existingBackup;
+
   const mergedData =
     existing &&
     existing.data &&
@@ -1121,6 +1132,46 @@ async function enqueueSyncTask(task: SyncTask) {
     updatedAt: Math.max(task.updatedAt || Date.now(), existing?.updatedAt || 0),
   });
 
+  memQueue.set(normalizedId, cleanTask);
+  if (task.collectionName === '__top_reports__') {
+    getMemoryStore('reportsQueue').set(normalizedId, cleanTask);
+  }
+  const mergedForUid = Array.from(memQueue.values()).filter(
+    (t: any) => t && t.uid === task.uid
+  ) as SyncTask[];
+  for (const b of backupTasks) {
+    if (!mergedForUid.some((m) => m.id === b.id)) {
+      mergedForUid.push(b);
+    }
+  }
+  writeBackupSyncQueueForUid(task.uid, mergedForUid);
+  return cleanTask;
+}
+
+async function enqueueSyncTask(task: SyncTask) {
+  const normalizedId = task.id.startsWith(`${task.uid}:`) ? task.id : `${task.uid}:${task.id}`;
+  // Synchronously persist in memory + localStorage first so a hung IndexedDB can never lose a queued write
+  const initialClean = enqueueSyncTaskSync(task);
+
+  const existing = await localGet<SyncTask>('syncQueue', normalizedId);
+  const mergedData =
+    existing &&
+    existing.data &&
+    typeof existing.data === 'object' &&
+    !Array.isArray(existing.data) &&
+    initialClean.data &&
+    typeof initialClean.data === 'object' &&
+    !Array.isArray(initialClean.data)
+      ? stripUndefined({ ...existing.data, ...initialClean.data })
+      : stripUndefined(initialClean.data);
+
+  const cleanTask: SyncTask = stripUndefined({
+    ...initialClean,
+    id: normalizedId,
+    data: mergedData,
+    updatedAt: Math.max(initialClean.updatedAt || Date.now(), existing?.updatedAt || 0),
+  });
+
   await localPut('syncQueue', cleanTask);
   if (task.collectionName === '__top_reports__') {
     await localPut('reportsQueue', cleanTask);
@@ -1130,6 +1181,18 @@ async function enqueueSyncTask(task: SyncTask) {
 }
 
 async function removeSyncTask(id: string, uid?: string) {
+  getMemoryStore('syncQueue').delete(id);
+  getMemoryStore('reportsQueue').delete(id);
+  if (uid && !id.startsWith(`${uid}:`)) {
+    getMemoryStore('syncQueue').delete(`${uid}:${id}`);
+    getMemoryStore('reportsQueue').delete(`${uid}:${id}`);
+  }
+  if (uid) {
+    const remainingMem = Array.from(getMemoryStore('syncQueue').values()).filter(
+      (t: any) => t && t.uid === uid && t.id !== id && t.id !== `${uid}:${id}`
+    ) as SyncTask[];
+    writeBackupSyncQueueForUid(uid, remainingMem);
+  }
   await localDelete('syncQueue', id);
   await localDelete('reportsQueue', id);
   if (uid && !id.startsWith(`${uid}:`)) {
@@ -2051,6 +2114,39 @@ export async function getProfile(
  * - Does NOT await any Firestore network call
  * - Immediately returns `{ ok: true, profile: normalized }`
  */
+function getSyncCachedProfile(uid: string): UserProfile | null {
+  if (!uid) return null;
+  const mem =
+    (getMemoryStore('profile').get(uidKey(uid, 'profile')) as UserProfile | undefined) ||
+    (getMemoryStore('profile').get(uid) as UserProfile | undefined);
+  if (mem && (!mem.uid || mem.uid === uid)) {
+    return { ...mem, uid };
+  }
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const rawLs =
+        localStorage.getItem(`${uid}:profile`) || localStorage.getItem(`hf_profile_${uid}`);
+      if (rawLs) {
+        const parsed = JSON.parse(rawLs) as UserProfile;
+        if (parsed && (!parsed.uid || parsed.uid === uid)) {
+          return { ...parsed, uid };
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function getSyncCachedSchedule(uid: string): SchedulePrefs | null {
+  if (!uid) return null;
+  const mem =
+    (getMemoryStore('schedule').get(uidKey(uid, 'schedule')) as SchedulePrefs | undefined) ||
+    (getMemoryStore('schedule').get(uid) as SchedulePrefs | undefined);
+  return mem || null;
+}
+
 export async function saveOnboardingStepProgress(
   uid: string,
   nextStep: number,
@@ -2059,8 +2155,18 @@ export async function saveOnboardingStepProgress(
   onError?: (msg: string) => void
 ): Promise<{ ok: boolean; profile: UserProfile; error?: string }> {
   const now = Date.now();
-  const existingLocal = await getLocalProfile(uid);
-  const existingSchedule = await getLocalSchedule(uid);
+  const syncExistingProfile = getSyncCachedProfile(uid);
+  const syncExistingSchedule = getSyncCachedSchedule(uid);
+
+  const existingLocal =
+    (await withTimeout(getLocalProfile(uid), idbTimeoutMs, 'IDB profile read timeout').catch(
+      () => syncExistingProfile
+    )) || syncExistingProfile;
+  const existingSchedule =
+    (await withTimeout(getLocalSchedule(uid), idbTimeoutMs, 'IDB schedule read timeout').catch(
+      () => syncExistingSchedule
+    )) || syncExistingSchedule;
+
   const provider = isGuest ? 'anonymous' : existingLocal?.provider || 'google';
 
   const mergedRaw: Record<string, any> = stripUndefined({
@@ -2091,14 +2197,15 @@ export async function saveOnboardingStepProgress(
       updatedAt: now,
     } as UserProfile);
 
-  await localPut('profile', normalized, uidKey(uid, 'profile'));
-  await localPut('profile', normalized, uid);
+  // 1. Update in-memory stores and localStorage synchronously first so a never-settling IDB promise cannot block state or sync
+  getMemoryStore('profile').set(uidKey(uid, 'profile'), normalized);
+  getMemoryStore('profile').set(uid, normalized);
   saveOnboardingStepForUid(uid, nextStep);
 
   const updatedSchedule = extractScheduleFromUserDoc(mergedRaw, existingSchedule);
   if (updatedSchedule) {
-    await localPut('schedule', updatedSchedule, uidKey(uid, 'schedule'));
-    await localPut('schedule', updatedSchedule, uid);
+    getMemoryStore('schedule').set(uidKey(uid, 'schedule'), updatedSchedule);
+    getMemoryStore('schedule').set(uid, updatedSchedule);
   }
 
   try {
@@ -2122,13 +2229,31 @@ export async function saveOnboardingStepProgress(
   });
 
   const syncTaskId = `${uid}:__root_user___${uid}`;
-  await enqueueSyncTask({
+  const syncTask: SyncTask = {
     id: syncTaskId,
     collectionName: '__root_user__',
     docId: uid,
     data: firestorePayload,
     uid,
     updatedAt: now,
+  };
+  enqueueSyncTaskSync(syncTask);
+
+  // 2. Persist to IndexedDB bounded by idbTimeoutMs
+  await withTimeout(
+    (async () => {
+      await localPut('profile', normalized, uidKey(uid, 'profile'));
+      await localPut('profile', normalized, uid);
+      if (updatedSchedule) {
+        await localPut('schedule', updatedSchedule, uidKey(uid, 'schedule'));
+        await localPut('schedule', updatedSchedule, uid);
+      }
+      await enqueueSyncTask(syncTask);
+    })(),
+    idbTimeoutMs,
+    'IndexedDB onboarding step write timed out'
+  ).catch(() => {
+    isUsingMemoryFallback = true;
   });
 
   recordWriteResult({
@@ -2173,10 +2298,11 @@ export interface OnboardingMetaMain {
 }
 
 /**
- * Local-first final onboarding step save (Requirement 3):
- * - Saves profile (with `onboardingComplete: true`), schedule, initialPlan, streaks, and painLog locally first
- * - Queues the atomic batch write (`users/{uid}` and `users/{uid}/meta/main`) in `syncQueue` and triggers background sync without awaiting the network
- * - Immediately returns `{ ok: true, profile: userDocPayload }` so "Your plan is ready" appears without waiting on the network
+ * Local-first final onboarding step save (Requirement 3 & 5):
+ * - Updates in-memory stores, localStorage, and syncQueue synchronously first so a never-settling IDB promise can never defeat the 2 s advance timer
+ * - Writes to IndexedDB bounded by `idbTimeoutMs`
+ * - Always triggers background sync without awaiting the network
+ * - Immediately returns `{ ok: true, profile: userDocPayload }`
  */
 export async function completeOnboardingBatch(
   uid: string,
@@ -2213,9 +2339,44 @@ export async function completeOnboardingBatch(
     updatedAt: now,
   });
 
-  // 1. Save profile, schedule, plan, streaks, painLog, and settings locally first
-  await localPut('profile', userDocPayload, uidKey(uid, 'profile'));
-  await localPut('profile', userDocPayload, uid);
+  const cleanSchedule = stripUndefined(fullSchedule);
+  const cleanPlan = stripUndefined(initialPlan);
+  const cleanStreaks = stripUndefined(nextStreaks);
+  const cleanPainLog = initialPainLog ? stripUndefined(initialPainLog) : null;
+  const settingsPayload = {
+    uid,
+    theme: userDocPayload.theme,
+    reducedMotion: userDocPayload.reducedMotion,
+    soundHaptics: userDocPayload.soundHaptics,
+    updatedAt: now,
+  };
+
+  // 1. Update in-memory stores, localStorage, and syncQueue synchronously first (0 ms)
+  getMemoryStore('profile').set(uidKey(uid, 'profile'), userDocPayload);
+  getMemoryStore('profile').set(uid, userDocPayload);
+  getMemoryStore('schedule').set(uidKey(uid, 'schedule'), cleanSchedule);
+  getMemoryStore('schedule').set(uid, cleanSchedule);
+  getMemoryStore('plans').set(`${uid}:${cleanPlan.date}`, {
+    ...cleanPlan,
+    uid,
+    originalDate: cleanPlan.date,
+    date: `${uid}:${cleanPlan.date}`,
+  });
+  getMemoryStore('streaks').set(uidKey(uid, 'streaks'), cleanStreaks);
+  getMemoryStore('streaks').set(uid, cleanStreaks);
+  if (cleanPainLog) {
+    const rawPainId = cleanPainLog.id.startsWith(`${uid}:`)
+      ? cleanPainLog.id.slice(uid.length + 1)
+      : cleanPainLog.id;
+    getMemoryStore('painLogs').set(`${uid}:${rawPainId}`, {
+      ...cleanPainLog,
+      uid,
+      rawId: rawPainId,
+      id: `${uid}:${rawPainId}`,
+    });
+  }
+  getMemoryStore('settings').set(uidKey(uid, 'settings'), settingsPayload);
+
   saveOnboardingStepForUid(uid, 9);
   try {
     const serialized = JSON.stringify(userDocPayload);
@@ -2225,88 +2386,96 @@ export async function completeOnboardingBatch(
     // ignore storage quota errors
   }
 
-  await localPut('schedule', stripUndefined(fullSchedule), uidKey(uid, 'schedule'));
-  await localPut('schedule', stripUndefined(fullSchedule), uid);
-  await saveLocalPlanForUid(uid, initialPlan);
-  await localPut('streaks', stripUndefined(nextStreaks), uidKey(uid, 'streaks'));
-  await localPut('streaks', stripUndefined(nextStreaks), uid);
-  if (initialPainLog) {
-    await saveLocalPainLogForUid(uid, initialPainLog);
-  }
-  await localPut(
-    'settings',
-    {
-      uid,
-      theme: userDocPayload.theme,
-      reducedMotion: userDocPayload.reducedMotion,
-      soundHaptics: userDocPayload.soundHaptics,
-      updatedAt: now,
-    },
-    uidKey(uid, 'settings')
-  );
-
-  // 2. Queue root user doc, meta/main, and subcollection mirrors in syncQueue
   const userSyncId = `${uid}:__root_user___${uid}`;
   const metaSyncId = `${uid}:meta_main`;
-
-  await enqueueSyncTask({
-    id: userSyncId,
-    collectionName: '__root_user__',
-    docId: uid,
-    data: userDocPayload,
-    uid,
-    updatedAt: now,
-  });
-  await enqueueSyncTask({
-    id: metaSyncId,
-    collectionName: 'meta',
-    docId: 'main',
-    data: metaDocPayload,
-    uid,
-    updatedAt: now,
-  });
-  await enqueueSyncTask({
-    id: `${uid}:data_profile`,
-    collectionName: 'data',
-    docId: 'profile',
-    data: userDocPayload,
-    uid,
-    updatedAt: now,
-  });
-  await enqueueSyncTask({
-    id: `${uid}:data_schedule`,
-    collectionName: 'data',
-    docId: 'schedule',
-    data: stripUndefined(fullSchedule),
-    uid,
-    updatedAt: now,
-  });
-  await enqueueSyncTask({
-    id: `${uid}:plans_${initialPlan.date}`,
-    collectionName: 'plans',
-    docId: initialPlan.date,
-    data: stripUndefined(initialPlan),
-    uid,
-    updatedAt: now,
-  });
-  await enqueueSyncTask({
-    id: `${uid}:data_streaks`,
-    collectionName: 'data',
-    docId: 'streaks',
-    data: stripUndefined(nextStreaks),
-    uid,
-    updatedAt: now,
-  });
-  if (initialPainLog) {
-    await enqueueSyncTask({
-      id: `${uid}:painLogs_${initialPainLog.id}`,
+  const tasksToQueue: SyncTask[] = [
+    {
+      id: userSyncId,
+      collectionName: '__root_user__',
+      docId: uid,
+      data: userDocPayload,
+      uid,
+      updatedAt: now,
+    },
+    {
+      id: metaSyncId,
+      collectionName: 'meta',
+      docId: 'main',
+      data: metaDocPayload,
+      uid,
+      updatedAt: now,
+    },
+    {
+      id: `${uid}:data_profile`,
+      collectionName: 'data',
+      docId: 'profile',
+      data: userDocPayload,
+      uid,
+      updatedAt: now,
+    },
+    {
+      id: `${uid}:data_schedule`,
+      collectionName: 'data',
+      docId: 'schedule',
+      data: cleanSchedule,
+      uid,
+      updatedAt: now,
+    },
+    {
+      id: `${uid}:plans_${cleanPlan.date}`,
+      collectionName: 'plans',
+      docId: cleanPlan.date,
+      data: cleanPlan,
+      uid,
+      updatedAt: now,
+    },
+    {
+      id: `${uid}:data_streaks`,
+      collectionName: 'data',
+      docId: 'streaks',
+      data: cleanStreaks,
+      uid,
+      updatedAt: now,
+    },
+  ];
+  if (cleanPainLog) {
+    tasksToQueue.push({
+      id: `${uid}:painLogs_${cleanPainLog.id}`,
       collectionName: 'painLogs',
-      docId: initialPainLog.id,
-      data: stripUndefined(initialPainLog),
+      docId: cleanPainLog.id,
+      data: cleanPainLog,
       uid,
       updatedAt: now,
     });
   }
+
+  for (const t of tasksToQueue) {
+    enqueueSyncTaskSync(t);
+  }
+
+  // 2. Persist to IndexedDB bounded by idbTimeoutMs
+  await withTimeout(
+    (async () => {
+      await localPut('profile', userDocPayload, uidKey(uid, 'profile'));
+      await localPut('profile', userDocPayload, uid);
+      await localPut('schedule', cleanSchedule, uidKey(uid, 'schedule'));
+      await localPut('schedule', cleanSchedule, uid);
+      await saveLocalPlanForUid(uid, cleanPlan);
+      await localPut('streaks', cleanStreaks, uidKey(uid, 'streaks'));
+      await localPut('streaks', cleanStreaks, uid);
+      if (cleanPainLog) {
+        await saveLocalPainLogForUid(uid, cleanPainLog);
+      }
+      await localPut('settings', settingsPayload, uidKey(uid, 'settings'));
+      for (const t of tasksToQueue) {
+        await enqueueSyncTask(t);
+      }
+    })(),
+    idbTimeoutMs,
+    'IndexedDB completeOnboardingBatch write timed out'
+  ).catch(() => {
+    isUsingMemoryFallback = true;
+  });
 
   recordWriteResult({
     status: 'success',
@@ -2879,9 +3048,10 @@ export async function submitProblemReport(
   };
   await enqueueSyncTask(task);
 
-  if (auth.currentUser && auth.currentUser.uid === uid && navigator.onLine) {
-    const ok = await syncDocWithRetry(task, onError, 1);
-    return { syncedNow: ok };
+  const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
+  if (auth.currentUser && auth.currentUser.uid === uid && isOnline) {
+    void flushPendingSyncQueue(uid, onError);
+    return { syncedNow: true };
   }
   return { syncedNow: false };
 }
@@ -2914,15 +3084,15 @@ export async function clearAllUserData(uid: string): Promise<void> {
   }
 
   if (auth.currentUser && auth.currentUser.uid === uid) {
-    try {
-      await deleteDoc(doc(firestoreDb, 'users', uid));
-      await deleteDoc(doc(firestoreDb, 'users', uid, 'meta', 'main'));
-      await deleteDoc(doc(firestoreDb, 'users', uid, 'data', 'profile'));
-      await deleteDoc(doc(firestoreDb, 'users', uid, 'data', 'schedule'));
-      await deleteDoc(doc(firestoreDb, 'users', uid, 'data', 'streaks'));
-    } catch (e) {
+    void Promise.all([
+      deleteDoc(doc(firestoreDb, 'users', uid)),
+      deleteDoc(doc(firestoreDb, 'users', uid, 'meta', 'main')),
+      deleteDoc(doc(firestoreDb, 'users', uid, 'data', 'profile')),
+      deleteDoc(doc(firestoreDb, 'users', uid, 'data', 'schedule')),
+      deleteDoc(doc(firestoreDb, 'users', uid, 'data', 'streaks')),
+    ]).catch((e) => {
       handleFirestoreError(e, OperationType.DELETE, `users/${uid}/data/*`);
-    }
+    });
   }
 }
 

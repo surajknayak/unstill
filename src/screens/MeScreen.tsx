@@ -39,7 +39,7 @@ import {
 } from '../lib/db';
 import { databaseId } from '../lib/firebase';
 import { Level, CheerStyle, LastWriteResult } from '../types';
-import { APP_VERSION } from '../config';
+import { APP_VERSION, BUILD_ID } from '../config';
 import { IANA_TIMEZONES } from './OnboardingScreen';
 
 function checkWebPushSupported(): {
@@ -599,6 +599,9 @@ export const MeScreen: React.FC = () => {
             </div>
             <div className="space-y-1 text-[11px] font-mono text-[var(--text)] break-all">
               <div>
+                <span className="text-[var(--text-soft)]">buildId:</span> {BUILD_ID}
+              </div>
+              <div>
                 <span className="text-[var(--text-soft)]">uid:</span> {user?.uid || 'none'}
               </div>
               <div>
@@ -664,6 +667,8 @@ export const MeScreen: React.FC = () => {
                 data-testid="copy-debug-info-btn"
                 onClick={async () => {
                   const payload = {
+                    buildId: BUILD_ID,
+                    appVersion: APP_VERSION,
                     uid: user?.uid || 'none',
                     provider:
                       user?.provider || profile.provider || (user?.isGuest ? 'anonymous' : 'google'),

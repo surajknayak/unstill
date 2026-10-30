@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => {
   return {
     openDBCalls: [] as Array<{ name: string; version: number; callbacks: any }>,
     deleteDBCalls: [] as string[],
-    simulateMode: 'healthy' as 'healthy' | 'old_schema_not_found' | 'idb_unavailable',
+    simulateMode: 'healthy' as 'healthy' | 'old_schema_not_found' | 'idb_unavailable' | 'idb_hung',
     closedConnections: 0,
     guestExistingData: {} as Record<string, any[]>,
     firestoreProfileDoc: null as Record<string, any> | null,
@@ -123,6 +123,12 @@ vi.mock('idb', () => {
         const err = new Error('IndexedDB is disabled in private mode');
         err.name = 'SecurityError';
         throw err;
+      }
+
+      if (mocks.simulateMode === 'idb_hung') {
+        return new Promise(() => {
+          // Never settles
+        });
       }
 
       if (mocks.simulateMode === 'old_schema_not_found') {
@@ -269,8 +275,18 @@ import {
   waitForSyncQueueIdle,
   getLastSyncTime,
   getLastSyncError,
+  setIdbTimeoutForTest,
   setFirestoreWriteTimeoutForTest,
 } from './db';
+import {
+  APP_VERSION,
+  BUILD_ID,
+  isBuildOlderThan,
+  checkVersionJsonAndKillSwitch,
+  isUpdateBannerDismissedForBuild,
+  dismissUpdateBannerForBuild,
+  hasShownUpdateBannerInSession,
+} from '../config';
 import {
   selectLatestPainLog,
   computeInitialPainCheckinState,
@@ -951,5 +967,217 @@ describe('IndexedDB schema upgrade, NotFoundError auto-repair, and Firestore pro
     expect(stateAfterReSignIn.energy).toBe('Low');
     expect(formatTimeAgo(2000, 2000 + 5 * 60 * 1000)).toBe('5m ago');
   });
+
+  it('never hangs on a never-settling IndexedDB promise during saveOnboardingStepProgress or completeOnboardingBatch, falls back to in-memory store, and always runs background Firestore sync', async () => {
+    const uid = 'user_hung_idb_999';
+    mocks.currentUser = { uid, isAnonymous: false };
+    mocks.simulateMode = 'idb_hung';
+    setIdbTimeoutForTest(40);
+
+    const startStep = Date.now();
+    const stepRes = await saveOnboardingStepProgress(uid, 2, {
+      name: 'Suraj',
+      ageBand: '25–34',
+      sex: 'Male',
+      timeZone: 'Asia/Kolkata',
+    });
+    const stepElapsed = Date.now() - startStep;
+
+    expect(stepRes.ok).toBe(true);
+    expect(stepElapsed).toBeLessThan(500);
+
+    // Background sync still runs even though IndexedDB never settled
+    await waitForSyncQueueIdle();
+    expect(mocks.setDocCalls).toHaveLength(1);
+    expect(mocks.setDocCalls[0].path).toBe(`users/${uid}`);
+    expect(mocks.setDocCalls[0].data.name).toBe('Suraj');
+
+    // Final onboarding batch also completes quickly and runs background batch commit
+    const now = Date.now();
+    const startFinal = Date.now();
+    const finalRes = await completeOnboardingBatch(
+      uid,
+      {
+        ...stepRes.profile,
+        uid,
+        level: 'Steady',
+        goal: 'Ease stiffness',
+        conditions: ['neck_cs'],
+        painBaseline: { neck_cs: 3 },
+        safetyFlags: [],
+        cheerStyle: 'Warm & celebratory',
+        theme: 'light',
+        reducedMotion: false,
+        soundHaptics: true,
+        onboardingComplete: true,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        workStart: '09:30',
+        workEnd: '18:00',
+        workType: 'Desk / laptop',
+        breakWindows: ['10:30', '13:15', '15:30', '17:30'],
+        daysOff: [0, 6],
+        remindersPerDay: 4,
+        quietHours: { start: '21:30', end: '08:00' },
+        equipment: ['Chair / Desk'],
+        location: 'At desk',
+      },
+      {
+        planSummary: {
+          whyThisPlan: 'Neck comfort',
+          level: 'Steady',
+          goal: 'Ease stiffness',
+          focusAreas: ['Neck'],
+          remindersPerDay: 4,
+          activeWindow: '09:30 – 18:00',
+          workType: 'Desk / laptop',
+          location: 'At desk',
+          equipment: ['Chair / Desk'],
+        },
+        monthlyTheme: 'Ease stiffness',
+        weeklyRhythm: {
+          workStart: '09:30',
+          workEnd: '18:00',
+          workType: 'Desk / laptop',
+          remindersPerDay: 4,
+          daysOff: [0, 6],
+          breakWindows: ['10:30', '13:15', '15:30', '17:30'],
+          level: 'Steady',
+        },
+        planVersion: 1,
+        updatedAt: now,
+      },
+      {
+        date: '2026-10-30',
+        tasks: [],
+        completedCount: 0,
+        totalCount: 4,
+        activeMinutes: 0,
+        waterCups: 0,
+        waterGoal: 8,
+        steps: 0,
+        stepGoal: 6500,
+      },
+      {
+        currentStreak: 0,
+        bestStreak: 0,
+        freezeTokens: 2,
+        maxFreezes: 2,
+        lastActiveDate: '',
+        weeklyConsistency: {},
+        badges: ['First Step'],
+      },
+      null,
+      false
+    );
+    expect(finalRes.ok).toBe(true);
+    expect(Date.now() - startFinal).toBeLessThan(500);
+
+    await waitForSyncQueueIdle();
+    expect(mocks.batchCommitCalls).toBeGreaterThanOrEqual(1);
+    const cachedProfile = await getLocalProfile(uid);
+    expect(cachedProfile?.onboardingComplete).toBe(true);
+  });
+
+  it('includes build id in APP_VERSION, triggers /version.json kill switch once when older than minBuild without clearing IndexedDB or localStorage, and remembers dismissed update banner build id', async () => {
+    expect(BUILD_ID).toBeTruthy();
+    expect(APP_VERSION).toContain('1.0 · build ');
+
+    expect(isBuildOlderThan('2026-10-29-1a2b', '2026-10-30-3f2a')).toBe(true);
+    expect(isBuildOlderThan('2026-10-30-3f2a', '2026-10-30-3f2a')).toBe(false);
+    expect(isBuildOlderThan('2026-10-30-3f2a-r10', '2026-10-30-3f2a-r11')).toBe(true);
+    expect(isBuildOlderThan('2026-10-30-3f2a-r12', '2026-10-30-3f2a-r11')).toBe(false);
+
+    const ssMap = new Map<string, string>();
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: {
+        getItem: (k: string) => ssMap.get(k) ?? null,
+        setItem: (k: string, v: string) => ssMap.set(k, v),
+        removeItem: (k: string) => ssMap.delete(k),
+      },
+      configurable: true,
+      writable: true,
+    });
+
+    let unregisteredCount = 0;
+    const deletedCaches: string[] = [];
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        onLine: true,
+        serviceWorker: {
+          getRegistrations: async () => [
+            {
+              unregister: async () => {
+                unregisteredCount += 1;
+                return true;
+              },
+            },
+          ],
+        },
+      },
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'caches', {
+      value: {
+        keys: async () => ['workbox-precache-v2', 'unstill-html-cache'],
+        delete: async (k: string) => {
+          deletedCaches.push(k);
+          return true;
+        },
+      },
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'fetch', {
+      value: vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          version: '1.0',
+          buildId: '2026-10-30-9f9f',
+          minBuild: '2026-10-30-9f9f',
+        }),
+      })),
+      configurable: true,
+      writable: true,
+    });
+
+    // Seed user data in localStorage to verify kill switch never deletes user data
+    globalThis.localStorage.setItem('user_returning_123:profile', '{"name":"Aarav"}');
+
+    let reloads = 0;
+    const res1 = await checkVersionJsonAndKillSwitch({
+      currentBuildId: '2026-10-28-aaaa',
+      reloadFn: () => {
+        reloads += 1;
+      },
+    });
+    expect(res1.triggeredKillSwitch).toBe(true);
+    expect(unregisteredCount).toBe(1);
+    expect(deletedCaches).toEqual(['workbox-precache-v2', 'unstill-html-cache']);
+    expect(reloads).toBe(1);
+    expect(globalThis.localStorage.getItem('user_returning_123:profile')).toBe('{"name":"Aarav"}');
+    expect(mocks.deleteDBCalls).toHaveLength(0);
+
+    // Calling again in the same session for the same minBuild is guarded by sessionStorage (no reload loop)
+    const res2 = await checkVersionJsonAndKillSwitch({
+      currentBuildId: '2026-10-28-aaaa',
+      reloadFn: () => {
+        reloads += 1;
+      },
+    });
+    expect(res2.triggeredKillSwitch).toBe(false);
+    expect(reloads).toBe(1);
+
+    // Update banner dismissal remembers build id in localStorage and sessionStorage
+    expect(isUpdateBannerDismissedForBuild('2026-10-30-9f9f')).toBe(false);
+    dismissUpdateBannerForBuild('2026-10-30-9f9f');
+    expect(isUpdateBannerDismissedForBuild('2026-10-30-9f9f')).toBe(true);
+    expect(hasShownUpdateBannerInSession('2026-10-30-9f9f')).toBe(true);
+    expect(isUpdateBannerDismissedForBuild('2026-10-31-aaaa')).toBe(false);
+  });
 });
+
 

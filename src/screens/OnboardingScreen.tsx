@@ -909,6 +909,22 @@ export const OnboardingScreen: React.FC = () => {
     return base;
   };
 
+  const notifyOnboardingStepSavedAndAdvanced = (nextStep: number) => {
+    try {
+      const activeEl = document?.activeElement as HTMLElement | null;
+      if (activeEl && typeof activeEl.blur === 'function') {
+        activeEl.blur();
+      }
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('unstill:onboarding-step-saved', { detail: { nextStep } })
+        );
+      }
+    } catch {
+      // ignore in headless/restricted environments
+    }
+  };
+
   const handleContinueStep = async () => {
     if (step === 3 && !step3Valid) {
       setStep3Attempted(true);
@@ -926,6 +942,7 @@ export const OnboardingScreen: React.FC = () => {
         advanced = true;
         triggerSavedTick();
         advanceToStep(nextStep);
+        notifyOnboardingStepSavedAndAdvanced(nextStep);
       }
     }, 3000);
 
@@ -941,12 +958,14 @@ export const OnboardingScreen: React.FC = () => {
         advanced = true;
         triggerSavedTick();
         advanceToStep(nextStep);
+        notifyOnboardingStepSavedAndAdvanced(nextStep);
       }
     } catch {
       if (!advanced) {
         advanced = true;
         triggerSavedTick();
         advanceToStep(nextStep);
+        notifyOnboardingStepSavedAndAdvanced(nextStep);
       }
     } finally {
       window.clearTimeout(maxDisableTimer);

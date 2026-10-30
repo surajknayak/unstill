@@ -7,7 +7,6 @@ import {
   Award,
   Clock,
   CheckCircle2,
-  TrendingDown,
   Calendar,
   Sparkles,
   Lightbulb,
@@ -15,7 +14,7 @@ import {
 import tipsData from '../data/tips.json';
 
 export const ProgressScreen: React.FC = () => {
-  const { streaks, sessions, painLogs, todayPlan } = useApp();
+  const { streaks, sessions, todayPlan } = useApp();
 
   const totalSessions = sessions.length;
   const totalMinutes = Math.round(
@@ -37,8 +36,6 @@ export const ProgressScreen: React.FC = () => {
     const status = streaks.weeklyConsistency[dateStr] || 'none';
     return { dateStr, dayLabel, status };
   });
-
-  const recentPains = painLogs.slice(0, 7).reverse();
 
   return (
     <div className="space-y-5 pb-28">
@@ -122,62 +119,6 @@ export const ProgressScreen: React.FC = () => {
             );
           })}
         </div>
-      </GlassCard>
-
-      {/* Comfort & Stiffness Trend */}
-      <GlassCard className="p-5 space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="font-display font-bold text-sm text-[var(--text)] flex items-center gap-2">
-            <TrendingDown className="w-4 h-4 text-emerald-500" /> Comfort & Stiffness Log
-          </h3>
-          <span className="text-[11px] font-semibold text-[var(--text-soft)]">
-            0 = Great · 10 = High
-          </span>
-        </div>
-
-        {recentPains.length === 0 ? (
-          <p className="text-xs text-[var(--text-soft)] py-3">
-            No comfort logs yet. Tap &ldquo;Comfort check&rdquo; on Today to track how your joints feel over time.
-          </p>
-        ) : (
-          <div className="space-y-2.5 pt-1">
-            {recentPains.map((log) => {
-              const vals = Object.values(log.scores) as number[];
-              const avg =
-                vals.length > 0
-                  ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length)
-                  : 0;
-              return (
-                <div key={log.id} className="space-y-1">
-                  <div className="flex justify-between text-xs">
-                    <span className="font-bold text-[var(--text)]">
-                      {log.date} · Stiffness: {log.stiffness}
-                    </span>
-                    <span className="font-bold text-sky-600 dark:text-sky-400">
-                      Avg {avg}/10
-                    </span>
-                  </div>
-                  <div className="w-full h-2.5 rounded-full bg-white/95 dark:bg-white/15 border border-slate-200/80 dark:border-white/10 overflow-hidden">
-                    {avg > 0 && (
-                      <div
-                        className="h-full rounded-full transition-all"
-                        style={{
-                          width: `${Math.max(8, avg * 10)}%`,
-                          background:
-                            avg <= 3
-                              ? 'linear-gradient(90deg, #5EE6B0 0%, #24B47E 100%)'
-                              : avg <= 6
-                              ? 'linear-gradient(90deg, #27C8E8 0%, #2EB8F5 100%)'
-                              : 'linear-gradient(90deg, #FFD24D 0%, #FF7A59 100%)',
-                        }}
-                      />
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
       </GlassCard>
 
       {/* Earned Badges */}

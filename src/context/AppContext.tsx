@@ -13,8 +13,7 @@ import {
   OAuthCredential,
   User as FirebaseUser,
 } from 'firebase/auth';
-import { doc, setDoc } from 'firebase/firestore';
-import { auth, db as firestoreDb, googleProvider } from '../lib/firebase';
+import { auth, googleProvider } from '../lib/firebase';
 import {
   UserProfile,
   SchedulePrefs,
@@ -105,6 +104,7 @@ interface AppContextType {
   user: AppUser | null;
   loading: boolean;
   authRestored: boolean;
+  isAuthPopupOpen: boolean;
   profileLoadError: string | null;
   retryLoadProfile: () => Promise<void>;
   startFreshOnboarding: () => void;
@@ -230,6 +230,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [authRestored, setAuthRestored] = useState(false);
+  const [isAuthPopupOpen, setIsAuthPopupOpen] = useState(false);
   const [profileLoadError, setProfileLoadError] = useState<string | null>(null);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [isShowingPlanReady, setIsShowingPlanReady] = useState(false);
@@ -997,9 +998,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     try {
       setLoading(true);
+      setIsAuthPopupOpen(true);
       isLinkingGuestRef.current = true;
       googleProvider.setCustomParameters({ prompt: 'select_account' });
       const res = await signInWithPopup(auth, googleProvider);
+      setIsAuthPopupOpen(false);
       localStorage.removeItem('hf_guest_uid');
       const mapped = mapFirebaseUserToAppUser(res.user);
       userRef.current = mapped;
@@ -1007,6 +1010,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isLinkingGuestRef.current = false;
       await routeAndLoadUserForUid(mapped);
     } catch (e: any) {
+      setIsAuthPopupOpen(false);
       isLinkingGuestRef.current = false;
       setLoading(false);
       const rawErr = e instanceof Error ? e.message : String(e);
@@ -1102,6 +1106,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const guestWorkoutsSnapshot = [...workouts];
 
     try {
+      setIsAuthPopupOpen(true);
       isLinkingGuestRef.current = true;
       googleProvider.setCustomParameters({ prompt: 'select_account' });
 
@@ -1114,6 +1119,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const res = await signInWithPopup(auth, googleProvider);
         linkedFbUser = res.user;
       }
+      setIsAuthPopupOpen(false);
 
       const sameUid = linkedFbUser.uid;
       const googleFirstName = extractFirstNameFromDisplayName(linkedFbUser.displayName);
@@ -1129,6 +1135,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (guestProfileSnapshot) {
         const updatedProfile: UserProfile = {
           ...guestProfileSnapshot,
+          ...guestScheduleSnapshot,
           uid: sameUid,
           name: resolvedName,
           email: linkedFbUser.email || undefined,
@@ -1141,35 +1148,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         profileRef.current = updatedProfile;
         setProfile(updatedProfile);
 
-        // Await root users/{uid} update directly so isGuest: false and provider: 'google' are immediately committed
-        try {
-          await setDoc(
-            doc(firestoreDb, 'users', sameUid),
-            {
-              ...updatedProfile,
-              ...guestScheduleSnapshot,
-              uid: sameUid,
-              name: resolvedName,
-              email: linkedFbUser.email || '',
-              photoURL: linkedFbUser.photoURL || '',
-              provider: 'google',
-              isGuest: false,
-              onboardingComplete: true,
-              updatedAt: now,
-            },
-            { merge: true }
-          );
-          recordWriteResult({
-            status: 'success',
-            operation: 'write',
-            path: `users/${sameUid}`,
-            timestamp: Date.now(),
-            error: null,
-          });
-        } catch (err) {
-          console.warn('[UnStill Auth] Queuing linked profile write:', err);
-        }
-
+        // Save locally and queue background sync without awaiting Firestore network calls
         await saveProfile(sameUid, updatedProfile, handleCloudError);
         await saveSchedule(sameUid, guestScheduleSnapshot, handleCloudError);
         await saveStreaks(sameUid, guestStreaksSnapshot, handleCloudError);
@@ -1177,6 +1156,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         for (const s of guestSessionsSnapshot) await saveSessionLog(sameUid, s, handleCloudError);
         for (const p of guestPainsSnapshot) await savePainLog(sameUid, p, handleCloudError);
         for (const w of guestWorkoutsSnapshot) await saveCustomWorkout(sameUid, w, handleCloudError);
+        void flushPendingSyncQueue(sameUid, handleCloudError);
       }
 
       localStorage.removeItem('hf_guest_uid');
@@ -1196,6 +1176,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       showToast('Your progress is now saved to your Google account', 'success');
     } catch (e: any) {
+      setIsAuthPopupOpen(false);
       isLinkingGuestRef.current = false;
       const rawErr = e instanceof Error ? e.message : String(e);
       console.warn('[UnStill Auth] Error linking guest account:', rawErr);
@@ -1305,16 +1286,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (currentUid && auth.currentUser?.uid === currentUid && navigator.onLine) {
       try {
-        await flushPendingSyncQueue(currentUid);
+        await Promise.race([
+          flushPendingSyncQueue(currentUid),
+          new Promise((resolve) => setTimeout(resolve, 400)),
+        ]);
       } catch {
         // keep un-flushed tasks in syncQueue under currentUid
       }
     }
 
-    await clearSessionCacheOnSignOut(currentUid);
+    await Promise.race([
+      clearSessionCacheOnSignOut(currentUid),
+      new Promise((resolve) => setTimeout(resolve, 800)),
+    ]);
 
     try {
-      await fbSignOut(auth);
+      await Promise.race([
+        fbSignOut(auth),
+        new Promise((resolve) => setTimeout(resolve, 800)),
+      ]);
     } catch {
       // ignore sign-out network errors
     }
@@ -1335,8 +1325,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const activeU = resolveOrRestoreUser();
     const existingP = profileRef.current;
     const preserveCompleted = Boolean(isEditingProfile && existingP?.onboardingComplete === true);
+    const now = Date.now();
 
-    const res = await saveOnboardingStepProgress(
+    const optimisticProfile: UserProfile = {
+      ...(existingP || {}),
+      ...stepAnswers,
+      uid: activeU.uid,
+      email: activeU.email || existingP?.email,
+      photoURL: activeU.photoURL || existingP?.photoURL,
+      provider: activeU.provider,
+      isGuest: activeU.isGuest,
+      onboardingStep: nextStep,
+      onboardingComplete: preserveCompleted,
+      createdAt: existingP?.createdAt || now,
+      updatedAt: now,
+    } as UserProfile;
+
+    profileRef.current = optimisticProfile;
+    setProfile(optimisticProfile);
+
+    const optimisticSched = extractScheduleFromUserDoc(
+      optimisticProfile as Record<string, any>,
+      scheduleRef.current
+    );
+    if (optimisticSched) {
+      scheduleRef.current = optimisticSched;
+      setSchedule(optimisticSched);
+    }
+
+    const savePromise = saveOnboardingStepProgress(
       activeU.uid,
       nextStep,
       {
@@ -1351,16 +1368,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       handleCloudError
     );
 
-    profileRef.current = res.profile;
-    setProfile(res.profile);
+    const res = await Promise.race([
+      savePromise,
+      new Promise<{ ok: boolean; profile: UserProfile }>((resolve) =>
+        setTimeout(() => resolve({ ok: true, profile: optimisticProfile }), 1500)
+      ),
+    ]);
 
-    const updatedSched = extractScheduleFromUserDoc(
-      res.profile as Record<string, any>,
-      scheduleRef.current
-    );
-    if (updatedSched) {
-      scheduleRef.current = updatedSched;
-      setSchedule(updatedSched);
+    if (res?.profile) {
+      profileRef.current = res.profile;
+      setProfile(res.profile);
     }
 
     return { ok: true };
@@ -1491,24 +1508,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedAt: now,
     };
 
-    const batchRes = await completeOnboardingBatch(
-      activeU.uid,
-      fullProfile,
-      fullSchedule,
-      metaMain,
-      initialPlan,
-      nextStreaks,
-      initialPainLog,
-      activeU.isGuest,
-      handleCloudError
-    );
-
+    // Update in-memory state immediately so even if completeOnboardingBatch hits its timeout, the app has the full plan ready
     scheduleRef.current = fullSchedule;
     todayPlanRef.current = initialPlan;
     streaksRef.current = nextStreaks;
+    profileRef.current = fullProfile;
     setSchedule(fullSchedule);
     setTodayPlan(initialPlan);
     setStreaks(nextStreaks);
+    setProfile(fullProfile);
     if (initialPainLog) {
       painLogsRef.current = [initialPainLog];
       setPainLogs([initialPainLog]);
@@ -1521,8 +1529,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setIsEditingProfile(false);
     }
 
-    profileRef.current = batchRes.profile;
-    setProfile(batchRes.profile);
+    const batchPromise = completeOnboardingBatch(
+      activeU.uid,
+      fullProfile,
+      fullSchedule,
+      metaMain,
+      initialPlan,
+      nextStreaks,
+      initialPainLog,
+      activeU.isGuest,
+      handleCloudError
+    );
+
+    const batchRes = await Promise.race([
+      batchPromise,
+      new Promise<{ ok: boolean; profile: UserProfile }>((resolve) =>
+        setTimeout(() => resolve({ ok: true, profile: fullProfile }), 1500)
+      ),
+    ]);
+
+    if (batchRes?.profile) {
+      profileRef.current = batchRes.profile;
+      setProfile(batchRes.profile);
+    }
     setShowWelcomeOverride(false);
     setProfileLoadError(null);
     if (!stayOnSummaryScreen) {
@@ -2034,6 +2063,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         user,
         loading,
         authRestored,
+        isAuthPopupOpen,
         profileLoadError,
         retryLoadProfile,
         startFreshOnboarding,
